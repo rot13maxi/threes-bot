@@ -23,7 +23,7 @@ import report
 from jev_threes_bot import play_game, CONF_THRESHOLD
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-THREES_DIR = os.path.expanduser("~/threes")
+THREES_DIR = os.path.join(HERE, "..", "game")
 TEST_PORT = 8399
 TEST_URL = "http://localhost:%d" % TEST_PORT
 

@@ -1,6 +1,6 @@
 # Jev Threes Bot
 
-Unattended bot that plays complete games of the Threes clone in `~/threes/`
+Unattended bot that plays complete games of the Threes clone in `../game/`
 by asking the TypeSafe Jev (System One) decision model which swipe to make
 each turn, gated by a closed-set harness, with a deterministic fallback
 policy. Plan: `~/plans/jev-threes-bot.md`.
@@ -8,11 +8,12 @@ policy. Plan: `~/plans/jev-threes-bot.md`.
 ## Prerequisites
 
 1. Start the game server (the bot does NOT start it):
-   `cd ~/threes && node server.js`   →  API on http://localhost:8321
+   `cd ../game && node server.js`   →  API on http://localhost:8321
 2. Check: `curl http://localhost:8321/api/health` → `{"ok":true,...}`
-3. Jev API key at `~/.hermes/credentials/typesafe-api-key.txt`
-   (or env `TYPESAFE_API_KEY`). Only needed for live games, not
-   `--policy-only`.
+3. Jev API key: put `TYPESAFE_API_KEY=...` in `bot/.env` (git-ignored,
+   chmod 600), or export the env var, or use
+   `~/.hermes/credentials/typesafe-api-key.txt`. Only needed for live
+   games, not `--policy-only`.
 
 ## Running
 

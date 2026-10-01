@@ -2,7 +2,7 @@
 """Jev Threes bot — driver (plan D1, D7, D8, D11).
 
 Plays complete games of the Threes clone served by `node server.js` on
-localhost:8321 (start it yourself: `cd ~/threes && node server.js`).
+localhost:8321 (start it yourself: `cd ../game && node server.js`).
 
 Each turn the compiled state facts are put to the TypeSafe Jev (System One)
 decision model as ONE closed-set choice question over the server's

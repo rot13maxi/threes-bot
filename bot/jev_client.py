@@ -1,8 +1,9 @@
 """Thin stdlib client for the TypeSafe System One API (Jev).
 
 Python 3.9 compatible (no typesafe-sdk — it needs >=3.10).
-Reads the API key from ~/.hermes/credentials/typesafe-api-key.txt
-or the TYPESAFE_API_KEY env var.
+Reads the API key from (first hit wins): the TYPESAFE_API_KEY env var,
+a `.env` file next to this module (git-ignored), or
+~/.hermes/credentials/typesafe-api-key.txt.
 """
 import json
 import os
@@ -12,10 +13,28 @@ import urllib.request
 
 API_URL = "https://api.typesafe.ai/v1/systemone"
 KEY_PATH = os.path.expanduser("~/.hermes/credentials/typesafe-api-key.txt")
+ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+
+
+def _load_dotenv(path=ENV_PATH):
+    """Parse a minimal KEY=VALUE .env into os.environ (existing vars win)."""
+    if not os.path.exists(path):
+        return
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k and k not in os.environ:
+                os.environ[k] = v
 
 
 class JevClient:
     def __init__(self, key=None, model="jev-latest", timeout=60, max_retries=4):
+        _load_dotenv()
         self.key = key or os.environ.get("TYPESAFE_API_KEY")
         if not self.key and os.path.exists(KEY_PATH):
             with open(KEY_PATH) as f:

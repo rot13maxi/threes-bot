@@ -33,15 +33,15 @@ Design invariants (why it's built this way):
 - **Everything is seeded & deterministic** — `--seed N` replays are byte-identical,
   which is what makes the offline test suite and benchmark regressions meaningful.
 - **No key material in the repo** — the Jev API key is read from the
-  `TYPESAFE_API_KEY` env var, or `~/.hermes/credentials/typesafe-api-key.txt` if you
-  use Hermes credential storage.
+  `TYPESAFE_API_KEY` env var, a git-ignored `bot/.env`, or
+  `~/.hermes/credentials/typesafe-api-key.txt` if you use Hermes credential storage.
 
 ## Requirements
 
 - Node.js ≥ 16 (game module) — no `npm install` needed, zero dependencies.
 - Python ≥ 3.9 (bot module) — stdlib only, no `pip install` needed.
 - A TypeSafe API key, only for live-Jev mode (`--policy-only` needs no network):
-  `export TYPESAFE_API_KEY=***
+  put `TYPESAFE_API_KEY=*** in `bot/.env`, or `export TYPESAFE_API_KEY=***
 
 ## Run everything
 
