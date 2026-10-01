@@ -84,6 +84,33 @@ class CompilerFacts(unittest.TestCase):
         for d, f in out["options"].items():
             self.assertFalse("grid" in compiler.criterion_line(d, f))
 
+    def test_board_text_is_exact_ascii_view(self):
+        # hand-derived from SAMPLE_STATE["grid"]:
+        #   [0, 1, 2, 0] / [0, 3, 3, 6] / [1, 0, 12, 24] / [2, 0, 0, 48]
+        out = compiler.compile_state(SAMPLE_STATE)
+        self.assertEqual(
+            out["board_text"],
+            ". 1 2 .\n"
+            ". 3 3 6\n"
+            "1 . 12 24\n"
+            "2 . . 48")
+        self.assertEqual(len(out["board_text"].split("\n")), 4)
+
+    def test_board_text_renders_zeros_as_dot(self):
+        out = compiler.compile_state(
+            self._state([[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [24, 0, 0, 48]],
+                        ["left", "up"]))
+        self.assertEqual(
+            out["board_text"],
+            ". . . .\n"
+            ". . . .\n"
+            ". . . .\n"
+            "24 . . 48")
+
+    def test_compile_state_top_level_keys_exactly_board_options_board_text(self):
+        out = compiler.compile_state(SAMPLE_STATE)
+        self.assertEqual(set(out.keys()), {"board", "options", "board_text"})
+
     def test_compiler_agrees_with_server_valid_moves(self):
         # cross-check our slide legality vs the authoritative engine
         with _Server():

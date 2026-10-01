@@ -244,8 +244,15 @@ def compile_state(state):
     merge destination if it merged — the merged tile counts as the max
     tile's cell even though its value grew) is a corner. Max tile < 3 ->
     True (nothing to anchor yet).
+    Returns {board, options, board_text}. `board_text` is a plain ASCII
+    rendering of the board (4 rows of 4 cell values, left-to-right, single
+    spaces, zeros as `.`) so the Jev fast path can SEE the spatial layout. It
+    is a visual aid only: Jev still cannot count or do arithmetic, so every
+    number it needs stays precomputed above.
     """
     grid = state["grid"]
+    board_text = "\n".join(" ".join("." if v == 0 else str(v) for v in row)
+                           for row in grid)
     max_tile = max([v for row in grid for v in row] or [0])
     empty_before = sum(1 for row in grid for v in row if v == 0)
     worst_vals = [v for row in grid for v in row if v]
@@ -362,7 +369,7 @@ def compile_state(state):
             "anchor_kept": anchor_kept,
             "max_tile_corner_after": corner_after,
         }
-    return {"board": board, "options": options}
+    return {"board": board, "options": options, "board_text": board_text}
 
 
 def criterion_line(dir, facts):
