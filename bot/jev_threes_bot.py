@@ -4,16 +4,23 @@
 Plays complete games of the Threes clone served by `node server.js` on
 localhost:8321 (start it yourself: `cd ../game && node server.js`).
 
-Each turn the compiled state facts are put to the TypeSafe Jev (System One)
-decision model as ONE closed-set choice question over the server's
-validMoves; the answer is accepted only if choice is legal AND
-confidence >= 0.55, otherwise the deterministic fallback policy (policy.py)
-moves. `--policy-only` skips Jev entirely (zero network to api.typesafe.ai).
+Live mode is jev-only: each turn the compiled state facts are put to the
+TypeSafe Jev (System One) decision model as ONE closed-set choice question
+over the server's validMoves, and the answer is accepted whenever it is a
+legal direction — no confidence gate, no greedy fallback. If Jev's answer is
+unusable (illegal, missing, or the call raised) it is re-asked once; if the
+re-ask is also unusable, the first legal direction in up,left,down,right
+order is played as an audited `lastresort` stub (run-record source
+"lastresort"). The prompt instructions come from a versioned file
+(--instructions PATH, default bot/prompts/iter-00-base.txt).
+`--policy-only` skips Jev entirely (zero network to api.typesafe.ai) and
+plays the deterministic greedy policy from policy.py instead.
 
 Examples:
   python3 jev_threes_bot.py --policy-only --games 20 --seeds 101-120
   python3 jev_threes_bot.py --policy-only --seed 42
   python3 jev_threes_bot.py --games 1 --seed 42
+  python3 jev_threes_bot.py --games 5 --instructions prompts/iter-01-aggressive.txt
   python3 jev_threes_bot.py --policy-only --delay 700 --seed 5   # watch-AI mode
 
 Python 3.9 stdlib only.
@@ -30,23 +37,36 @@ from compiler import compile_state, criterion_line
 from policy import choose_fallback
 
 BASE = "http://localhost:8321"
-CONF_THRESHOLD = 0.55           # D4 gate
 WIN_TILE_DEFAULT = 96           # D9
 MAX_FAILS = 50                  # D7 spin guard
+LASTRESORT_PRIORITY = ("up", "left", "down", "right")
+HERE = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_INSTRUCTIONS_PATH = os.path.join(HERE, "prompts", "iter-00-base.txt")
 
-PLAY_INSTRUCTIONS = (
-    "You are choosing the next swipe (up, down, left, right) in a Threes-like "
-    "4x4 sliding-tile game. Decision rule, applied in order: "
-    "(a) do not move your largest tile off its cell if any other swipe is "
-    "available (use the 'max tile displaced' fact); "
-    "(b) among the remaining options, remove the most 1s and 2s from the "
-    "board (use the 'worst tiles removed' and 'worst tile has partner' "
-    "facts); "
-    "(c) then pick the option with the most merges. If none of these "
-    "distinguish the options, pick the one leaving the most empty cells. "
-    "All numbers in the options are precomputed facts about what each swipe "
-    "does; pick the single best option."
-)
+
+def load_instructions(path=None):
+    """Read the Jev prompt instructions from a versioned prompt file
+    (bot/prompts/iter-XX-*.txt; one plain-text block per bench iteration).
+    Raises RuntimeError with a clear message when the file is missing."""
+    p = DEFAULT_INSTRUCTIONS_PATH if path is None else path
+    try:
+        with open(p, encoding="utf-8") as f:
+            text = f.read().strip()
+    except OSError as e:
+        raise RuntimeError("instructions file not readable: %s (%s)" % (p, e))
+    if not text:
+        raise RuntimeError("instructions file is empty: %s" % p)
+    return text
+
+
+def lastresort_dir(valid):
+    """First direction in up,left,down,right priority order that the server
+    lists as legal. A legal-move stub, not a strategy: only played when Jev
+    was unusable twice in a row (live mode never consults the greedy policy)."""
+    for d in LASTRESORT_PRIORITY:
+        if d in valid:
+            return d
+    return None
 
 
 def api(path, body=None, base=BASE, timeout=10):
@@ -59,7 +79,7 @@ def api(path, body=None, base=BASE, timeout=10):
         return json.loads(resp.read().decode())
 
 
-def jev_choose(state_facts, dirs, client):
+def jev_choose(state_facts, dirs, client, instructions):
     """One closed-set choice question. Returns (choice, confidence) or
     (None, None) on transport error (never trusts model output beyond id)."""
     criteria = {}
@@ -67,7 +87,7 @@ def jev_choose(state_facts, dirs, client):
         f = state_facts["options"].get(d)
         criteria[d] = criterion_line(d, f) if f else (d + ": no facts")
     qs = {"decision": {"type": "choice",
-                       "instructions": PLAY_INSTRUCTIONS,
+                       "instructions": instructions,
                        "criteria": criteria}}
     # state sent to Jev is ONLY compiled facts — never the raw grid (D5)
     try:
@@ -79,12 +99,19 @@ def jev_choose(state_facts, dirs, client):
 
 
 def play_game(seed, policy_only=False, client=None, delay_ms=0,
-              max_moves=3000, base=BASE, jev_fn=None):
+              max_moves=3000, base=BASE, jev_fn=None, instructions=None):
     """Play one seeded game. Returns the run-record dict (D7).
 
     jev_fn: optional (facts, dirs) -> (choice, confidence) override used by
     the offline tests to inject a fake Jev responder.
+    instructions: Jev prompt text; None loads load_instructions(None)
+    (DEFAULT_INSTRUCTIONS_PATH). Live mode is jev-only — no confidence gate,
+    no greedy fallback: any legal answer is accepted, an unusable answer is
+    re-asked once, then the first legal direction (up,left,down,right) is
+    played as an audited `lastresort` stub.
     """
+    if instructions is None:
+        instructions = load_instructions(None)
     state = api("/api/new", {"seed": seed} if seed is not None else {}, base=base)
     decisions = []
     fails = 0
@@ -103,44 +130,50 @@ def play_game(seed, policy_only=False, client=None, delay_ms=0,
         if not valid:
             break
         facts = compile_state(state)
-        src = "fallback"
+        src = None
         conf = None
         chosen = None
+        retries = 0
         jev_choice = None
         jev_conf = None
         jev_outcome = None
-        if not policy_only:
-            try:
-                if jev_fn is not None:
-                    choice, confidence = jev_fn(facts, valid)
-                else:
-                    choice, confidence = jev_choose(facts, valid, client)
-            except Exception:
-                # transport failure / bad responder => fallback (D4)
-                choice, confidence = None, None
-            if (choice is not None and choice in valid
-                    and isinstance(confidence, (int, float))
-                    and confidence >= CONF_THRESHOLD):
-                chosen, conf, src = choice, confidence, "jev"
-            else:
-                # C1 gate-out telemetry: record the rejected pick. Transport
-                # errors surface as (None, None) from jev_choose; a model
-                # answer of null/null is indistinguishable from the wire and
-                # is classed as transport_error per C1 ("null on transport").
-                jev_choice = choice
-                jev_conf = confidence
-                if choice is None and confidence is None:
-                    jev_outcome = "transport_error"
-                elif choice is None or choice not in valid:
-                    jev_outcome = "illegal"
-                else:
-                    # legal choice, confidence below gate (or non-numeric)
-                    jev_outcome = "gated_out"
-        if chosen is None:
+        if policy_only:
+            # --policy-only: pure greedy fallback, zero Jev calls. Live mode
+            # NEVER reaches choose_fallback (jev-only, no fallback policy).
             chosen = choose_fallback(valid, facts["options"])
+            src = "fallback"
+        else:
+            if jev_fn is not None:
+                ask = jev_fn
+            else:
+                def ask(f, d):
+                    return jev_choose(f, d, client, instructions)
+            transport_attempts = 0
+            for attempt in (0, 1):        # first answer + ONE re-ask
+                try:
+                    choice, confidence = ask(facts, valid)
+                    raised = False
+                except Exception:
+                    choice, confidence, raised = None, None, True
+                retries = attempt
+                jev_choice, jev_conf = choice, confidence
+                if choice is not None and choice in valid:
+                    # accept regardless of the confidence value/type
+                    chosen, conf, src = choice, confidence, "jev"
+                    jev_outcome = None
+                    break
+                jev_outcome = "illegal"   # None choice or not in validMoves
+                if raised or (choice is None and confidence is None):
+                    transport_attempts += 1
+            if chosen is None:            # both attempts unusable
+                if transport_attempts == 2:
+                    jev_outcome = "transport_error"
+                chosen = lastresort_dir(valid)
+                src = "lastresort"
         decision = {"turn": turn, "dir": chosen, "source": src,
-                    "confidence": conf, "validMoves": valid}
-        if jev_outcome is not None:
+                    "confidence": conf, "validMoves": valid,
+                    "retries": retries}
+        if jev_outcome is not None:       # lastresort telemetry (auditable)
             decision["jevChoice"] = jev_choice
             decision["jevConfidence"] = jev_conf
             decision["jevOutcome"] = jev_outcome
@@ -202,7 +235,7 @@ def parse_seeds(args):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Jev bot for the Threes clone")
     ap.add_argument("--policy-only", action="store_true",
-                    help="deterministic fallback only; zero Jev/network calls")
+                    help="deterministic greedy policy only; zero Jev/network calls")
     ap.add_argument("--seed", default="42", help="play this seed (default 42)")
     ap.add_argument("--games", type=int, default=3,
                     help="number of games (default 3, live smoke budget D11)")
@@ -214,6 +247,8 @@ def main(argv=None):
                     help="max_tile >= this counts as a win (default 96)")
     ap.add_argument("--max-moves", type=int, default=3000)
     ap.add_argument("--url", default=BASE, help=argparse.SUPPRESS)
+    ap.add_argument("--instructions", default=DEFAULT_INSTRUCTIONS_PATH,
+                    help="Jev prompt instructions file (default: %(default)s)")
     args = ap.parse_args(argv)
 
     seeds = parse_seeds(args)
@@ -222,15 +257,22 @@ def main(argv=None):
     else:
         seeds = [int(args.seed)] * args.games
 
+    try:
+        instructions = load_instructions(args.instructions)
+    except RuntimeError as e:
+        sys.stderr.write("error: %s\n" % e)
+        return 1
     client = None
     if not args.policy_only:
         from jev_client import JevClient
         try:
             client = JevClient()
         except Exception as e:
-            sys.stderr.write("Jev unavailable (%s) — falling back to policy-only "
-                             "for this batch\n" % e)
-            args.policy_only = True
+            # live mode is jev-only: NO silent policy-only downgrade
+            sys.stderr.write("error: live Jev mode needs a usable "
+                             "TYPESAFE_API_KEY (JevClient: %s) — rerun with "
+                             "--policy-only for the deterministic run\n" % e)
+            return 1
 
     os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs"),
                 exist_ok=True)
@@ -242,7 +284,7 @@ def main(argv=None):
     for i, seed in enumerate(seeds):
         rec = play_game(seed, policy_only=args.policy_only, client=client,
                         delay_ms=args.delay, max_moves=args.max_moves,
-                        base=args.url)
+                        base=args.url, instructions=instructions)
         rec["game_num"] = i + 1
         rec["win"] = rec["max_tile"] >= args.win_tile
         records.append(rec)
@@ -253,12 +295,13 @@ def main(argv=None):
     losses = len(records) - wins
     best = max(records, key=lambda r: r["score"])
     jev_n = sum(1 for r in records for d in r["decisions"] if d["source"] == "jev")
+    lr_n = sum(1 for r in records for d in r["decisions"] if d["source"] == "lastresort")
     fb_n = sum(1 for r in records for d in r["decisions"] if d["source"] == "fallback")
     print("games=%d wins=%d losses=%d (win-tile=%d)" % (len(records), wins, losses,
                                                          args.win_tile))
     print("best score=%d (seed %s, max_tile %s)" % (best["score"], best["seed"],
                                                     best["max_tile"]))
-    print("decisions: jev=%d fallback=%d" % (jev_n, fb_n))
+    print("decisions: jev=%d lastresort=%d fallback=%d" % (jev_n, lr_n, fb_n))
     if client is not None:
         s = client.summary()
         print("jev calls=%d input_tokens=%d cost_usd=%s avg_latency_s=%s"

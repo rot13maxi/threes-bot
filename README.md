@@ -8,8 +8,9 @@ text. Two self-contained modules:
 ```
 game/   Node.js (zero dependencies): game engine, JSON API server, browser client
         with a live "Watch AI" spectator mode.
-bot/    Python 3.9+ (stdlib only): the Jev bot, deterministic fallback policy,
-        state compiler, offline test suite, batch/report tooling.
+bot/    Python 3.9+ (stdlib only): the Jev bot (jev-only live play with
+        versioned prompts), deterministic greedy policy for --policy-only
+        runs, state compiler, offline test suite, benchmark/report tooling.
 ```
 
 ## How it fits together
@@ -21,8 +22,10 @@ bot/    Python 3.9+ (stdlib only): the Jev bot, deterministic fallback policy,
 └──────┬───────┘ /api/move     └──────────────────┘  ◀── watches API moves ──┤      │
        │        ◀───────────────  /api/new /api/undo     (👀 Watch AI mode)  └──────┘
        └── closed-set decision: enumerate legal moves in code → ask Jev for
-          ONE choice over compiled board facts → confidence gate 0.55 →
-          fall back to a deterministic greedy policy when Jev is unsure.
+          ONE choice over compiled board facts (prompt from a versioned
+          prompts/ file) → accept any legal answer, whatever the confidence;
+          re-ask once if unusable, else play the first legal direction as an
+          audited `lastresort` stub. Jev plays every live move.
 ```
 
 Design invariants (why it's built this way):
@@ -40,8 +43,9 @@ Design invariants (why it's built this way):
 
 - Node.js ≥ 16 (game module) — no `npm install` needed, zero dependencies.
 - Python ≥ 3.9 (bot module) — stdlib only, no `pip install` needed.
-- A TypeSafe API key, only for live-Jev mode (`--policy-only` needs no network):
-  put `TYPESAFE_API_KEY=*** in `bot/.env`, or `export TYPESAFE_API_KEY=***
+- A TypeSafe API key for live-Jev mode (`--policy-only` needs no network):
+  put `TYPESAFE_API_KEY=...` in `bot/.env`, or `export TYPESAFE_API_KEY=...`.
+  Live Jev mode hard-errors without a usable key — no silent policy-only downgrade.
 
 ## Run everything
 
@@ -67,7 +71,7 @@ node examples/ai-play.js --delay 700   # example greedy bot drives the game via 
 **4. Run the Jev bot** (from `bot/`):
 
 ```bash
-python3 test_offline.py                    # offline suite (25 tests, no network)
+python3 test_offline.py                    # offline suite (28 tests, no network)
 
 # spectate one game:  in the browser, open http://localhost:8321 and enable
 # 👀 Watch AI, then:
@@ -76,12 +80,13 @@ python3 jev_threes_bot.py --games 1 --seed 42 --delay 600
 # batch + reporting:
 python3 jev_threes_bot.py --games 20 --seeds 101-120 --policy-only   # deterministic, free
 python3 jev_threes_bot.py --games 5 --seeds 21-25                    # live Jev (~$0.001/game)
-python3 report.py runs/run-<timestamp>.jsonl    # scores, max tiles, jev vs fallback split
+python3 report.py runs/run-<timestamp>.jsonl    # scores, max tiles, decision-source split
 ```
 
-Flags: `--policy-only` (deterministic fallback only, zero network), `--seed N` /
+Flags: `--policy-only` (deterministic greedy policy only, zero network), `--seed N` /
 `--seeds A-B`, `--delay MS` (per-move sleep for spectating), `--win-tile N`
-(default 96 = "win"), `--max-moves N`.
+(default 96 = "win"), `--max-moves N`, `--instructions PATH` (Jev prompt file,
+default `bot/prompts/iter-00-base.txt`; prompts are versioned per bench iteration).
 
 The bot drives the game purely through the HTTP API (`/api/new` with its own seed,
 `/api/state`, `/api/move`), so the browser's Watch-AI view follows its moves live.
@@ -95,16 +100,18 @@ The bot drives the game purely through the HTTP API (`/api/new` with its own see
 | `game/public/` | Mobile-friendly browser client (Watch-AI spectator mode) |
 | `game/examples/ai-play.js` | Reference external-AI loop over the same API |
 | `game/test/engine.test.js` | Engine test suite |
-| `bot/jev_threes_bot.py` | Bot loop: legal-move enumeration, gate, executor, run log |
+| `bot/jev_threes_bot.py` | Bot loop: legal-move enumeration, jev-only decisions, lastresort stub, run log |
 | `bot/compiler.py` | Board → Jev-facing computed facts (never the raw grid) |
-| `bot/policy.py` | Deterministic greedy fallback policy |
+| `bot/policy.py` | Deterministic greedy policy (`--policy-only` mode only) |
+| `bot/prompts/` | Versioned Jev prompt instructions (baseline: `iter-00-base.txt`) |
+| `bot/bench.py` | Parallel benchmark: seed set × prompt file → per-tag summary |
 | `bot/jev_client.py` | Minimal stdlib client for `POST /v1/systemone` (+429 backoff) |
 | `bot/report.py` | Summarize a run `.jsonl` (scores, decisions, costs) |
-| `bot/test_offline.py` | Offline suite: compiler/policy/gate/determinism, no network |
+| `bot/test_offline.py` | Offline suite: compiler/policy/jev-only-live/determinism, no network |
 
 ## API notes
 
 - `POST /api/new {"seed": 42}` — seeded games make runs reproducible; omit `seed` for random.
 - `POST /api/move {"dir": "up|down|left|right"}` — illegal directions return `{ok:false,reason}`.
 - The browser client polls state; any external process moving via the API is visible live in Watch-AI mode.
-- Bot run logs record every turn: `validMoves`, the Jev choice + confidence (including gate-outs, via `jevOutcome`), and which policy moved.
+- Bot run logs record every turn: `validMoves`, `source` (`jev`/`lastresort`/`fallback`), `retries`, and — when Jev was unusable twice — `jevChoice`/`jevConfidence`/`jevOutcome`.

@@ -20,7 +20,8 @@ import urllib.request
 import compiler
 import policy
 import report
-from jev_threes_bot import play_game, CONF_THRESHOLD
+from jev_threes_bot import (play_game, load_instructions, lastresort_dir,
+                            DEFAULT_INSTRUCTIONS_PATH)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 THREES_DIR = os.path.join(HERE, "..", "game")
@@ -261,87 +262,150 @@ class GameLoop(unittest.TestCase):
             self.assertIn(d["dir"], d["validMoves"])
 
 
-# ---------------- fake Jev responder gate (AC 2h) ----------------
+# ---------------- fake Jev responder, jev-only live mode (AC 2h) ---------
 
-class JevGate(unittest.TestCase):
-    """Inject fake responders; malformed/low-confidence -> fallback."""
+class JevOnlyLive(unittest.TestCase):
+    """Inject fake responders. Live mode is jev-only: any legal choice is
+    used regardless of confidence; an unusable answer is re-asked once; two
+    unusable answers -> audited `lastresort` legal-direction stub.
+    `fallback` is produced ONLY by --policy-only."""
 
     def _play_with(self, jev_fn, seed=5):
         with _Server():
             return play_game(seed, client=object(), jev_fn=jev_fn,
                              base=TEST_URL, max_moves=200)
 
-    def test_unknown_choice_id_routes_to_fallback(self):
-        rec = self._play_with(lambda f, dirs: ("sideways", 0.99))
-        self.assertTrue(all(d["source"] == "fallback" for d in rec["decisions"]))
+    @staticmethod
+    def _expected_lastresort(valid):
+        # independent restatement of up,left,down,right priority order
+        return [d for d in ("up", "left", "down", "right") if d in valid][0]
 
-    def test_missing_choice_routes_to_fallback(self):
-        rec = self._play_with(lambda f, dirs: (None, 0.99))
-        self.assertTrue(all(d["source"] == "fallback" for d in rec["decisions"]))
-
-    def test_low_confidence_routes_to_fallback(self):
+    def test_legal_choice_low_confidence_is_used(self):
         def fn(facts, dirs):
-            return (dirs[0], CONF_THRESHOLD - 0.2)
-        rec = self._play_with(fn)
-        self.assertTrue(all(d["source"] == "fallback" for d in rec["decisions"]))
-
-    def test_confident_legal_choice_accepted(self):
-        def fn(facts, dirs):
-            return (dirs[0], 0.9)
+            return (dirs[0], 0.1)          # no gate anymore: 0.1 is fine
         rec = self._play_with(fn, seed=5)
-        self.assertTrue(any(d["source"] == "jev" for d in rec["decisions"]))
+        self.assertTrue(rec["decisions"])
         for d in rec["decisions"]:
-            if d["source"] == "jev":
-                self.assertIn(d["dir"], d["validMoves"])
-                self.assertGreaterEqual(d["confidence"], CONF_THRESHOLD)
+            self.assertEqual(d["source"], "jev")
+            self.assertEqual(d["retries"], 0)
+            self.assertEqual(d["dir"], d["validMoves"][0])
+            self.assertIn(d["dir"], d["validMoves"])
+            self.assertEqual(d["confidence"], 0.1)   # recorded as returned
+            self.assertNotIn("jevOutcome", d)
 
-    def test_transport_error_routes_to_fallback(self):
-        def boom(facts, dirs):
-            raise RuntimeError("network down")
-        rec = self._play_with(boom, seed=6)
-        self.assertTrue(all(d["source"] == "fallback" for d in rec["decisions"]))
-        # C1: every fallback turn keeps the rejected-pick telemetry
-        for d in rec["decisions"]:
-            self.assertEqual(d["jevOutcome"], "transport_error")
-            self.assertIsNone(d["jevChoice"])
-            self.assertIsNone(d["jevConfidence"])
-
-    # ---- C1 gate-out telemetry -------------------------------------------
-
-    def test_c1_gated_out_logged(self):
+    def test_string_confidence_does_not_reject_legal_choice(self):
         def fn(facts, dirs):
-            return (dirs[0], CONF_THRESHOLD - 0.2)
+            return (dirs[0], "high")       # non-numeric confidence accepted
         rec = self._play_with(fn, seed=5)
         for d in rec["decisions"]:
-            self.assertEqual(d["source"], "fallback")
-            self.assertEqual(d["jevOutcome"], "gated_out")
-            self.assertIn(d["jevChoice"], d["validMoves"])
-            self.assertEqual(d["jevConfidence"], CONF_THRESHOLD - 0.2)
+            self.assertEqual(d["source"], "jev")
+            self.assertEqual(d["confidence"], "high")
 
-    def test_c1_illegal_logged(self):
+    def test_illegal_then_legal_on_reask_accepted_as_jev(self):
+        seen = {"n": 0}
+        def fn(facts, dirs):              # stateful: bad ONCE, then good
+            seen["n"] += 1
+            if seen["n"] == 1:
+                return ("sideways", 0.99)
+            return (dirs[0], 0.5)
+        rec = self._play_with(fn, seed=5)
+        first = rec["decisions"][0]
+        self.assertEqual(first["source"], "jev")
+        self.assertEqual(first["retries"], 1)
+        self.assertEqual(first["dir"], first["validMoves"][0])
+        # exactly two fake-responder calls for that turn (answer + re-ask),
+        # then one call per remaining turn
+        self.assertEqual(seen["n"], 1 + len(rec["decisions"]))
+        for d in rec["decisions"][1:]:
+            self.assertEqual(d["source"], "jev")
+            self.assertEqual(d["retries"], 0)
+            self.assertNotIn("jevOutcome", d)
+
+    def test_none_then_legal_on_reask_accepted_as_jev(self):
+        seen = {"n": 0}
+        def fn(facts, dirs):
+            seen["n"] += 1
+            if seen["n"] == 1:
+                return (None, None)        # null/null like a transport error
+            return (dirs[0], 0.2)
+        rec = self._play_with(fn, seed=5)
+        first = rec["decisions"][0]
+        self.assertEqual(first["source"], "jev")
+        self.assertEqual(first["retries"], 1)
+        self.assertIn(first["dir"], first["validMoves"])
+
+    def test_both_attempts_illegal_routes_to_lastresort(self):
         rec = self._play_with(lambda f, dirs: ("sideways", 0.99), seed=5)
+        self.assertTrue(rec["decisions"])
         for d in rec["decisions"]:
-            self.assertEqual(d["source"], "fallback")
+            self.assertEqual(d["source"], "lastresort")
+            self.assertEqual(d["retries"], 1)
+            self.assertIn(d["dir"], d["validMoves"])
+            # stub picks by up,left,down,right priority over validMoves
+            self.assertEqual(d["dir"], self._expected_lastresort(d["validMoves"]))
+            self.assertIsNone(d["confidence"])
+            # last-attempt telemetry, audited
             self.assertEqual(d["jevOutcome"], "illegal")
             self.assertEqual(d["jevChoice"], "sideways")
             self.assertEqual(d["jevConfidence"], 0.99)
 
-    def test_c1_accepted_turn_has_no_outcome_and_policy_only_clean(self):
-        def fn(facts, dirs):
-            return (dirs[0], 0.9)
-        rec = self._play_with(fn, seed=5)
+    def test_both_attempts_none_routes_to_lastresort_transport_error(self):
+        rec = self._play_with(lambda f, dirs: (None, None), seed=5)
         for d in rec["decisions"]:
-            if d["source"] == "jev":
-                self.assertNotIn("jevOutcome", d)
-        # pure policy-only: jevOutcome never appears, original schema intact
+            self.assertEqual(d["source"], "lastresort")
+            self.assertEqual(d["jevOutcome"], "transport_error")
+            self.assertIsNone(d["jevChoice"])
+            self.assertIsNone(d["jevConfidence"])
+            self.assertEqual(d["dir"], self._expected_lastresort(d["validMoves"]))
+
+    def test_both_attempts_raising_routes_to_lastresort_transport_error(self):
+        def boom(facts, dirs):
+            raise RuntimeError("network down")
+        rec = self._play_with(boom, seed=6)
+        self.assertTrue(rec["decisions"])
+        for d in rec["decisions"]:
+            self.assertEqual(d["source"], "lastresort")
+            self.assertEqual(d["jevOutcome"], "transport_error")
+            self.assertIsNone(d["jevChoice"])
+            self.assertIsNone(d["jevConfidence"])
+            self.assertIn(d["dir"], d["validMoves"])
+
+    def test_live_mode_never_produces_fallback_source(self):
+        for fn in (lambda f, dirs: ("sideways", 0.99),
+                   lambda f, dirs: (None, None),
+                   lambda f, dirs: (dirs[0], 0.01)):
+            rec = self._play_with(fn, seed=7)
+            for d in rec["decisions"]:
+                self.assertIn(d["source"], ("jev", "lastresort"))
+
+    def test_lastresort_direction_priority_order(self):
+        self.assertEqual(lastresort_dir(["right", "down", "left", "up"]), "up")
+        self.assertEqual(lastresort_dir(["right", "down", "left"]), "left")
+        self.assertEqual(lastresort_dir(["right", "down"]), "down")
+        self.assertEqual(lastresort_dir(["right"]), "right")
+        self.assertIsNone(lastresort_dir([]))
+
+    def test_policy_only_uses_fallback_source_and_no_jev_telemetry(self):
+        # --policy-only path unchanged: greedy fallback, zero Jev calls
         with _Server():
-            rec2 = play_game(5, policy_only=True, base=TEST_URL)
-        for d in rec2["decisions"]:
+            rec = play_game(5, policy_only=True, base=TEST_URL)
+        self.assertTrue(rec["decisions"])
+        for d in rec["decisions"]:
+            self.assertEqual(d["source"], "fallback")
+            for k in ("turn", "dir", "source", "confidence", "validMoves"):
+                self.assertIn(k, d)
             self.assertNotIn("jevOutcome", d)
             self.assertNotIn("jevChoice", d)
             self.assertNotIn("jevConfidence", d)
-            for k in ("turn", "dir", "source", "confidence", "validMoves"):
-                self.assertIn(k, d)
+
+    def test_load_instructions_default_file(self):
+        text = load_instructions()          # default = iter-00-base
+        self.assertEqual(text, load_instructions(DEFAULT_INSTRUCTIONS_PATH))
+        self.assertIn("Threes-like", text)
+        self.assertIn("pick the single best option", text)
+        self.assertNotIn("\n", text)         # single plain-text block
+        with self.assertRaises(RuntimeError):
+            load_instructions(os.path.join(HERE, "prompts", "no-such-iter.txt"))
 
 
 # ---------------- report tool ----------------
