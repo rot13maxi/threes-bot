@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#171a21">
+<title>3's</title>
+<style>
+  :root {
+    --bg: #171a21; --panel: #1f242e; --line: #2b3140; --text: #e8eaf0; --dim: #8a93a6;
+    --accent: #6ea8fe; --danger: #ff6b6b;
+    --board: #232936; --cellbg: #2c3342;
+    --tile-gap: 8px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Rounded", "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; align-items: center;
+    padding: max(12px, env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom));
+    gap: 10px; user-select: none; -webkit-user-select: none;
+    touch-action: manipulation;
+  }
+  header { display: flex; align-items: baseline; gap: 12px; width: min(92vw, 440px); }
+  h1 { font-size: 22px; letter-spacing: 1px; }
+  h1 .three { color: #ffd23f; }
+  .stats { margin-left: auto; display: flex; gap: 14px; text-align: right; }
+  .stat .label { font-size: 10px; text-transform: uppercase; color: var(--dim); letter-spacing: 1px; }
+  .stat .value { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .queue { width: min(92vw, 440px); display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 12px; min-height: 26px;}
+  .qtile { width: 26px; height: 26px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; }
+
+  #boardwrap { position: relative; width: min(92vw, 440px); }
+  #board {
+    position: relative; width: 100%; aspect-ratio: 1; background: var(--board);
+    border-radius: 14px; touch-action: none; overflow: hidden;
+  }
+  .cells { position: absolute; inset: var(--tile-gap); display: grid;
+    grid-template: repeat(4, 1fr) / repeat(4, 1fr); gap: var(--tile-gap); }
+  .cell { background: var(--cellbg); border-radius: 10px; }
+  .tiles { position: absolute; inset: 0; }
+  .tile {
+    position: absolute; display: flex; align-items: center; justify-content: center;
+    border-radius: 10px; font-weight: 800; color: #fff;
+    transition: transform .12s ease, opacity .18s ease;
+    will-change: transform;
+  }
+  .tile.pop { animation: pop .16s ease; }
+  @keyframes pop { from { scale: .4; } to { scale: 1; } }
+
+  /* tile colors, Threes-flavored */
+  .t1  { background: #4a90d9; }
+  .t2  { background: #e05c5c; }
+  .t3  { background: #f2b134; color: #3a2c00; }
+  .t6  { background: #d97b2f; }
+  .t12 { background: #c8503c; }
+  .t24 { background: #8e44ad; }
+  .t48 { background: #6c3483; }
+  .t96 { background: #1abc9c; color: #06302a; }
+  .t192{ background: #16a085; }
+  .t384{ background: #27ae60; }
+  .t768{ background: #f39c12; color: #3a2c00; }
+  .t1536 { background: #ffd23f; color: #3a2c00; }
+  .tbig { background: #191d26; color: #ffd23f; border: 2px solid #ffd23f; }
+
+  #status { width: min(92vw, 440px); display: flex; align-items: center; gap: 10px; min-height: 26px; font-size: 13px; color: var(--dim); }
+  #dirflash { font-size: 18px; min-width: 24px; text-align: center; }
+  #lastactor { margin-left: auto; font-size: 11px; color: var(--dim); }
+
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; width: min(92vw, 440px); }
+  button {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 14px; font-size: 14px; font-weight: 600;
+    cursor: pointer; transition: background .15s, transform .05s;
+  }
+  button:active { transform: scale(.96); }
+  button.on { background: var(--accent); color: #0b1220; border-color: var(--accent); }
+  button.warn { border-color: var(--danger); color: var(--danger); }
+
+  #overlay {
+    position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(10,12,18,.82); border-radius: 14px; flex-direction: column; gap: 12px;
+    backdrop-filter: blur(3px);
+  }
+  #overlay.show { display: flex; animation: fadein .3s ease; }
+  @keyframes fadein { from { opacity: 0 } to { opacity: 1 } }
+  #overlay h2 { font-size: 26px; }
+  #overlay p { color: var(--dim); }
+
+  footer { font-size: 11px; color: var(--dim); text-align: center; line-height: 1.5; }
+  code { background: var(--panel); padding: 1px 5px; border-radius: 5px; font-size: 10.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>3<span class="three">'s</span></h1>
+  <div class="stats">
+    <div class="stat"><div class="label">Score</div><div class="value" id="score">0</div></div>
+    <div class="stat"><div class="label">Moves</div><div class="value" id="moves">0</div></div>
+    <div class="stat"><div class="label">Best</div><div class="value" id="best">0</div></div>
+  </div>
+</header>
+
+<div class="queue" id="queue"></div>
+
+<div id="boardwrap">
+  <div id="board">
+    <div class="cells" id="cells"></div>
+    <div class="tiles" id="tiles"></div>
+    <div id="overlay">
+      <h2 id="ovTitle">Game over</h2>
+      <p id="ovSub"></p>
+      <button id="ovNew">New game</button>
+    </div>
+  </div>
+</div>
+
+<div id="status">
+  <span id="dirflash"></span>
+  <span id="msg">Swipe or use arrow keys / WASD.</span>
+  <span id="lastactor"></span>
+</div>
+
+<div class="controls">
+  <button id="btnNew" class="warn">New</button>
+  <button id="btnUndo">Undo</button>
+  <button id="btnWatch" title="Poll the API and follow an AI's moves">👀 Watch AI</button>
+  <button id="btnBot" title="Demo bot plays through the API">🤖 Demo bot</button>
+  <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim)">speed
+    <input id="speed" type="range" min="120" max="1200" step="40" value="450" style="width:80px">
+  </label>
+</div>
+
+<footer>
+  API: <code>GET /api/state</code> · <code>POST /api/move {"dir":"left"}</code> · <code>POST /api/new {"seed":42}</code> · <code>POST /api/undo</code>
+</footer>
+
+<script>
+'use strict';
+const SIZE = 4, GAP = 8;
+const $ = (id) => document.getElementById(id);
+const board = $('board'), tileLayer = $('tiles');
+const cellsEl = $('cells');
+for (let i = 0; i < 16; i++) { const d = document.createElement('div'); d.className = 'cell'; cellsEl.appendChild(d); }
+
+let state = null;          // last rendered state
+let tileEls = new Map();   // "r,c" -> element
+let watchMode = false, botMode = false, botTimer = null, pollTimer = null;
+let best = Number(localStorage.getItem('threes3-best') || 0);
+$('best').textContent = best;
+
+function tileClass(v) {
+  if ([1,2,3,6,12,24,48,96,192,384,768,1536].includes(v)) return 't' + v;
+  return 'tbig';
+}
+function fontSize(v) {
+  const s = String(v).length;
+  return s <= 2 ? 'clamp(22px, 8vw, 42px)' : s === 3 ? 'clamp(18px, 6.5vw, 34px)' : 'clamp(14px, 5vw, 26px)';
+}
+function place(el, r, c) {
+  const cell = board.clientWidth / SIZE;
+  el.style.width = el.style.height = (cell - GAP) + 'px';
+  el.style.transform = `translate(${c * cell + GAP/2}px, ${r * cell + GAP/2}px)`;
+}
+
+/* deterministic renderer: use the server's authoritative lastMove.steps when
+   the transition is a single consecutive move; full rebuild otherwise */
+function mkTile(v, r, c, pop) {
+  const el = document.createElement('div');
+  el.className = 'tile ' + tileClass(v);
+  el.textContent = v;
+  el.style.fontSize = fontSize(v);
+  place(el, r, c);
+  if (pop) el.classList.add('pop');
+  tileLayer.appendChild(el);
+  return el;
+}
+function buildAll(next) {
+  tileLayer.innerHTML = '';
+  tileEls.clear();
+  for (let r = 0; r < SIZE; r++) for (let c = 0; c < SIZE; c++) {
+    const v = next.grid[r][c];
+    if (v) tileEls.set(r + ',' + c, mkTile(v, r, c, false));
+  }
+}
+function keyOf(r, c) { return r + ',' + c; }
+
+function render(next) {
+  const prev = state;
+  $('score').textContent = next.score;
+  $('moves').textContent = next.moves;
+  if (next.score > best) { best = next.score; localStorage.setItem('threes3-best', best); $('best').textContent = best; }
+
+  // queue preview
+  const q = $('queue'); q.innerHTML = '';
+  (next.queue || []).forEach((v, i) => {
+    const s = document.createElement('span');
+    s.className = 'qtile ' + tileClass(v);
+    s.textContent = v; s.style.opacity = 1 - i * 0.28;
+    q.appendChild(s);
+  });
+  if (next.queue && next.queue.length) q.insertAdjacentHTML('beforeend', '<span>up next</span>');
+
+  const lm = next.lastMove;
+  const isConsecutiveMove = prev && lm &&
+    next.version === prev.version + 1 && next.moves === prev.moves + 1;
+
+  if (!isConsecutiveMove) {
+    buildAll(next);                       // fresh render: new game, undo, boot
+  } else {
+    // 1) slide every step; merge participants fade after sliding
+    const stepKeys = new Set();
+    for (const s of lm.steps) stepKeys.add(keyOf(s.from[0], s.from[1]));
+    for (const s of lm.steps) {
+      const fk = keyOf(s.from[0], s.from[1]);
+      const el = tileEls.get(fk);
+      if (!el) continue;
+      tileEls.delete(fk);
+      place(el, s.to[0], s.to[1]);
+      if (s.merge) {
+        el.style.opacity = '0';
+        setTimeout(() => el.remove(), 220);
+      } else {
+        tileEls.set(keyOf(s.to[0], s.to[1]), el);
+      }
+    }
+    // 2) merge destinations: front tile becomes the result (pop)
+    for (const s of lm.steps) {
+      if (!s.merge) continue;
+      const tk = keyOf(s.to[0], s.to[1]);
+      const v = next.grid[s.to[0]][s.to[1]];
+      let el = tileEls.get(tk);
+      if (el) {
+        el.textContent = v;
+        el.className = 'tile ' + tileClass(v);
+        el.style.fontSize = fontSize(v);
+        void el.offsetWidth;              // restart pop animation
+        el.classList.add('pop');
+      } else {
+        tileEls.set(tk, mkTile(v, s.to[0], s.to[1], true));
+      }
+    }
+    // 3) spawn tile
+    if (lm.spawn) {
+      const sk = keyOf(lm.spawn.row, lm.spawn.col);
+      if (!tileEls.has(sk)) tileEls.set(sk, mkTile(lm.spawn.value, lm.spawn.row, lm.spawn.col, true));
+    }
+    // 4) safety net: reconcile against authoritative grid (drops strays)
+    const want = new Set();
+    for (let r = 0; r < SIZE; r++) for (let c = 0; c < SIZE; c++)
+      if (next.grid[r][c]) want.add(keyOf(r, c));
+    for (const [k, el] of tileEls) {
+      if (!want.has(k)) { tileEls.delete(k); el.remove(); }
+    }
+    for (let r = 0; r < SIZE; r++) for (let c = 0; c < SIZE; c++) {
+      const v = next.grid[r][c];
+      const k = keyOf(r, c);
+      if (v && !tileEls.has(k)) tileEls.set(k, mkTile(v, r, c, false));
+      else if (v && tileEls.get(k).textContent !== String(v)) {
+        const el = tileEls.get(k);
+        el.textContent = v; el.className = 'tile ' + tileClass(v); el.style.fontSize = fontSize(v);
+      }
+    }
+  }
+
+  // direction flash + actor
+  if (next.lastMove) {
+    const arrow = { up: '▲', down: '▼', left: '◀', right: '▶' }[next.lastMove.direction];
+    $('dirflash').textContent = arrow || '';
+    if (prev && next.version !== prev.version) {
+      $('msg').textContent = next.gameOver ? 'No moves left.' : `Valid: ${next.validMoves.join(' / ')}`;
+    }
+  }
+  $('btnUndo').disabled = !next.canUndo;
+
+  const ov = $('overlay');
+  if (next.gameOver) {
+    ov.classList.add('show');
+    $('ovTitle').textContent = 'Game over';
+    $('ovSub').textContent = `Score ${next.score} · best tile ${next.maxTile} · ${next.moves} moves`;
+  } else {
+    ov.classList.remove('show');
+  }
+  state = next;
+}
+
+/* ---- API ---- */
+async function api(path, body) {
+  const r = await fetch(path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : undefined);
+  return r.json();
+}
+
+let inflight = false;
+async function submitMove(dir) {
+  if (inflight || !state || state.gameOver) return false;
+  if (!state.validMoves.includes(dir)) {
+    $('msg').textContent = `"${dir}" is not a valid move (${state.validMoves.join('/')}).`;
+    return false;
+  }
+  inflight = true;
+  let s;
+  try { s = await api('/api/move', { dir }); }
+  catch (e) { inflight = false; $('msg').textContent = 'network error: ' + e; return false; }
+  inflight = false;
+  if (s.ok) { render(s); return true; }
+  $('msg').textContent = `Move rejected: ${s.reason}`;
+  return false;
+}
+
+/* input: keys */
+const KEYS = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', w: 'up', s: 'down', a: 'left', d: 'right' };
+addEventListener('keydown', (e) => {
+  if (botMode || watchMode) return;
+  const dir = KEYS[e.key];
+  if (dir) { e.preventDefault(); submitMove(dir); }
+});
+
+/* input: swipe */
+let touchStart = null;
+board.addEventListener('touchstart', (e) => { touchStart = [e.touches[0].clientX, e.touches[0].clientY]; }, { passive: true });
+board.addEventListener('touchend', (e) => {
+  if (botMode || watchMode || !touchStart) return;
+  const dx = e.changedTouches[0].clientX - touchStart[0];
+  const dy = e.changedTouches[0].clientY - touchStart[1];
+  touchStart = null;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < 24) return;
+  submitMove(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up'));
+}, { passive: true });
+// mouse drag for desktop without keyboard
+let mouseStart = null;
+board.addEventListener('mousedown', e => mouseStart = [e.clientX, e.clientY]);
+board.addEventListener('mouseup', e => {
+  if (botMode || watchMode || !mouseStart) return;
+  const dx = e.clientX - mouseStart[0], dy = e.clientY - mouseStart[1];
+  mouseStart = null;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < 24) return;
+  submitMove(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up'));
+});
+
+/* buttons */
+$('btnNew').onclick = async () => { tileEls.forEach(el => el.remove()); tileEls.clear(); const s = await api('/api/new', {}); render(s); };
+$('ovNew').onclick = () => $('btnNew').click();
+$('btnUndo').onclick = async () => { const s = await api('/api/undo', {}); if (s.ok) render(s); };
+
+/* demo bot: random-ish legal moves through the same API the AI uses */
+const DEMO_W = { up: 1, down: 1, left: 1.2, right: 1.2 };
+async function botStep() {
+  if (!state || state.gameOver) { stopBot(); return; }
+  const opts = state.validMoves;
+  let total = 0; const weights = opts.map(d => { const w = (DEMO_W[d] || 1) * (0.5 + Math.random()); total += w; return w; });
+  let pick = Math.random() * total, dir = opts[0];
+  for (let i = 0; i < opts.length; i++) { pick -= weights[i]; if (pick <= 0) { dir = opts[i]; break; } }
+  await submitMove(dir);
+  botTimer = setTimeout(botStep, Number($('speed').value));
+}
+function stopBot() { botMode = false; clearTimeout(botTimer); $('btnBot').classList.remove('on'); $('lastactor').textContent = ''; }
+$('btnBot').onclick = () => {
+  if (botMode) return stopBot();
+  stopWatch(); botMode = true; $('btnBot').classList.add('on'); $('lastactor').textContent = 'demo bot driving';
+  botStep();
+};
+
+/* watch AI: poll /api/state, follow external moves */
+function stopWatch() { watchMode = false; clearInterval(pollTimer); $('btnWatch').classList.remove('on'); }
+$('btnWatch').onclick = () => {
+  if (watchMode) { stopWatch(); $('lastactor').textContent = ''; return; }
+  stopBot(); watchMode = true; $('btnWatch').classList.add('on');
+  $('msg').textContent = 'Watching — waiting for someone to drive /api/move…';
+  let lastVersion = state ? state.version : -1;
+  pollTimer = setInterval(async () => {
+    const s = await api('/api/state');
+    if (!s.ok) return;
+    if (s.version !== lastVersion) {
+      lastVersion = s.version;
+      render(s);
+      if (s.lastMove) {
+        $('lastactor').textContent = `last: ${s.lastMove.direction} (+${s.lastMove.scoreDelta}) @ move ${s.moves}`;
+        $('msg').textContent = s.gameOver ? 'AI topped out.' : `Valid: ${s.validMoves.join(' / ')}`;
+      }
+    }
+  }, 250);
+};
+
+window.addEventListener('resize', () => {
+  for (const [key, el] of tileEls) { const [r, c] = key.split(',').map(Number); place(el, r, c); }
+});
+
+/* boot */
+(async () => {
+  let s = await api('/api/state');
+  if (!s.ok) s = await api('/api/new', {});
+  render(s);
+  $('msg').textContent = 'Swipe or use arrow keys / WASD.';
+})();
+</script>
+</body>
+</html>

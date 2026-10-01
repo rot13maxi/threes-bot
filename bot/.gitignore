@@ -1,0 +1,8 @@
+__pycache__/
+runs/
+*.log
+ac7-watch.out
+_ac6_check.py
+_ac7_probe.py
+_import_check.py
+_selfcheck.py

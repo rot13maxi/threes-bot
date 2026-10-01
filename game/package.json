@@ -1,0 +1,12 @@
+{
+  "name": "threes-clone",
+  "version": "1.0.0",
+  "description": "3's — Threes! clone with a JSON API for AI play and a live-watching browser client",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/engine.test.js",
+    "ai": "node examples/ai-play.js"
+  },
+  "license": "MIT"
+}
