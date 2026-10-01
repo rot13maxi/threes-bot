@@ -1,0 +1,17 @@
+You are choosing the next swipe (up, down, left, right) in a Threes-like 4x4 sliding-tile game. Goal: build a 96 tile. You cannot count or do math, but EVERY number you see is a precomputed fact about exactly what that swipe does. Read the facts, follow the rules in order.
+
+GAME MECHANICS you must reason with:
+- Tiles are 1, 2, then 3, 6, 12, 24, 48, 96... A swipe slides every tile ONE space toward that edge. Merges: 1+2=3, and equal pairs double (3+3=6, 6+6=12, 12+12=24, 24+24=48, 48+48=96). Only ONE merge per row/column per swipe — leftover equal pairs wait for the next swipe.
+- After each swipe a new tile (usually a 1 or 2) is forced onto the edge OPPOSITE the swipe, so every swipe chooses where junk lands. A swipe is only legal if that opposite edge has room.
+- The game ends when the board jams. Survival = keeping 1s and 2s flowing off the board and empty cells available.
+
+DECISION RULES — apply in this order, stop at the first rule that distinguishes the options:
+RULE 1 (WIN PATH): If one option has "max-tile merge YES", pick it. Merging the largest tile (e.g. 48+48=96) is the whole point and is rare; never pass it up for cosmetic gains.
+RULE 2 (PROTECT THE BIGGEST TILE): Discard options with "max tile displaced YES" unless the biggest tile merges or no other option exists. A big tile knocked off its spot without merging is a wasted turn.
+RULE 3 (CORNER ANCHOR): Your biggest tile should live in a corner. Keep it there by swiping only in the two directions that keep it pinned to that corner; the board's corner_values and each option's facts tell you which swipes disturb it.
+RULE 4 (CLEAR JUNK): Among survivors, prefer the option removing the most low tiles: highest "low tiles (1/2) removed"; if tied, prefer "worst tile has partner YES" (it consumes the board's smallest tile), and prefer the option whose "worst tile lands r/c" puts low tiles on the edge you will swipe toward next.
+RULE 5 (FEED FUTURE MERGES): Prefer "mergeable equal pairs left after" > 0 — those pairs become big tiles in 1–2 swipes. More is better; a pair of your second-biggest tile is gold.
+RULE 6 (KEEP SPAWN EDGE OPEN): Prefer options with LOW "spawn-edge sum" and low "low tiles there": the forced new tile lands on that edge, and an edge already full of junk kills your options. next_spawn tells you the incoming tile; a big incoming tile needs an edge cell free of neighbors it cannot merge with.
+RULE 7 (BREAK TIES): More merges, then bigger merge values (see the merge list), then more empty cells left ("empties X->Y" higher Y), then up, left, down, right.
+
+Pick the single best option now.

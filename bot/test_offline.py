@@ -44,9 +44,13 @@ D5_KEYS = ("moves", "merges", "merge_counts_by_value", "max_tile_mergeable",
            "sum_of_edges_opposite", "edge_worst_count", "next_spawn_value",
            # C2 additions
            "worst_tiles_removed", "worst_tile_companion",
-           "max_tile_displaced", "chain_pairs_after")
-D5_BOARD_KEYS = ("max_tile", "score", "empty_count", "corner_values",
-                 "worst_tile_count")
+           "max_tile_displaced", "chain_pairs_after",
+           # C3 additions
+           "spawn_edge_empties", "spawn_edge_has_big",
+           "isolated_big_after", "second_max_pair_exists")
+D5_BOARD_KEYS = ("max_tile", "max_tile_pos", "max_tile_pin_dirs",
+                 "score", "empty_count", "corner_values",
+                 "worst_tile_count", "worst_tile_value")
 
 
 def _deep_has_key(obj, key):
@@ -136,6 +140,134 @@ class CompilerFacts(unittest.TestCase):
         # left swipe: [3] alone per row -> col0 [3,0,12,0] no merges; no pairs
         out = compiler.compile_state(st)
         self.assertEqual(out["options"]["left"]["chain_pairs_after"], 0)
+
+    # --- C3: max-tile anchoring facts ------------------------------------
+
+    def _state(self, grid, valid, queue=(1, 2, 3)):
+        st = json.loads(json.dumps(SAMPLE_STATE))
+        st["grid"] = grid
+        st["validMoves"] = valid
+        st["queue"] = list(queue)
+        return st
+
+    def test_c3_corner_max_tile_pos_and_pin_dirs(self):
+        out = compiler.compile_state(
+            self._state([[48, 3, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
+                        ["up", "left", "down", "right"]))
+        self.assertEqual(out["board"]["max_tile_pos"], [0, 0])
+        # a swipe toward an edge the tile already sits on can never move it
+        self.assertEqual(out["board"]["max_tile_pin_dirs"], ["up", "left"])
+
+    def test_c3_edge_max_tile_pin_dirs(self):
+        # max at (0,2): only the "up" swipe (toward row 0) pins it in place
+        out = compiler.compile_state(
+            self._state([[0, 0, 48, 0], [0, 0, 0, 1], [0, 0, 0, 0], [0, 0, 0, 0]],
+                        ["up", "left", "down", "right"]))
+        self.assertEqual(out["board"]["max_tile_pos"], [0, 2])
+        self.assertEqual(out["board"]["max_tile_pin_dirs"], ["up"])
+
+    def test_c3_middle_max_tile_has_no_pin_dirs(self):
+        out = compiler.compile_state(
+            self._state([[0, 0, 0, 0], [0, 0, 0, 0], [0, 48, 1, 0], [0, 0, 0, 0]],
+                        ["up", "left", "down", "right"]))
+        self.assertEqual(out["board"]["max_tile_pos"], [2, 1])
+        self.assertEqual(out["board"]["max_tile_pin_dirs"], [])
+
+    def test_c3_empty_board_pos_and_worst_value_are_none(self):
+        out = compiler.compile_state(self._state([[0] * 4] * 4, []))
+        self.assertIsNone(out["board"]["max_tile_pos"])
+        self.assertEqual(out["board"]["max_tile_pin_dirs"], [])
+        self.assertIsNone(out["board"]["worst_tile_value"])
+
+    def test_c3_worst_tile_value(self):
+        out = compiler.compile_state(
+            self._state([[0, 2, 0, 0], [0, 0, 6, 0], [0, 0, 0, 24], [0, 0, 0, 0]],
+                        ["left"]))
+        self.assertEqual(out["board"]["worst_tile_value"], 2)
+
+    # --- C3: spawn-edge facts ---------------------------------------------
+
+    def test_c3_spawn_edge_empties_and_big_handverified(self):
+        # swipe up: col0 [3,6,12,24] is locked (every pair unmergeable, every
+        # cell blocked), so the bottom row post-slide is [24,0,0,0]:
+        # 3 empty cells on the spawn edge and a stranded 24 (>6) on it.
+        st = self._state([[3, 1, 0, 0], [6, 0, 0, 0], [12, 0, 0, 0], [24, 0, 0, 2]],
+                         ["up"])
+        up = compiler.compile_state(st)["options"]["up"]
+        self.assertEqual(up["spawn_edge_empties"], 3)
+        self.assertTrue(up["spawn_edge_has_big"])
+
+    def test_c3_spawn_edge_fully_clear(self):
+        # swipe up on bottom row [1,2,1,2]: every tile slides one step up,
+        # leaving all 4 spawn-edge cells empty and nothing big on it.
+        st = self._state([[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [1, 2, 1, 2]],
+                         ["up"])
+        up = compiler.compile_state(st)["options"]["up"]
+        self.assertEqual(up["spawn_edge_empties"], 4)
+        self.assertFalse(up["spawn_edge_has_big"])
+
+    # --- C3: isolation + next-big feed -------------------------------------
+
+    def test_c3_isolated_big_post_slide_via_compiler(self):
+        # swipe down: row0 [1,48,3,3] lands as row3 [1,48,3,3]. The 48 has
+        # neighbours 1 and 3 (no equal partner) -> counted once; the 3s pair
+        # with each other; 1 is never counted.
+        st = self._state([[1, 48, 3, 3], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
+                         ["down"])
+        self.assertEqual(compiler.compile_state(st)["options"]["down"]["isolated_big_after"], 1)
+
+    def test_c3_adjacent_twentyfours_not_isolated(self):
+        # swipe down: row2 [0,24,24,0] lands as row3 [0,24,24,0]; the 24s are
+        # orthogonally adjacent -> no isolated big tiles.
+        st = self._state([[0, 0, 0, 0], [0, 0, 0, 0], [0, 24, 24, 0], [0, 0, 0, 0]],
+                         ["down"])
+        self.assertEqual(compiler.compile_state(st)["options"]["down"]["isolated_big_after"], 0)
+
+    def test_c3_isolated_big_helper_edges(self):
+        # direct helper: 48 alone among 1s/3s counts; 1s and 2s never count
+        self.assertEqual(compiler._isolated_big_after(
+            [[3, 3, 0, 0], [1, 48, 0, 0], [24, 24, 0, 0], [0, 0, 0, 0]]), 1)
+        self.assertEqual(compiler._isolated_big_after(
+            [[1, 0, 0, 2], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]), 0)
+
+    def test_c3_second_max_pair_exists_feed(self):
+        # swipe right: post-slide row1/row2 each hold a 24 at col3 (pair),
+        # row3 becomes [0,48,1,0]; second-biggest value (pre-slide max=48,
+        # second=24) appears twice -> next big merge has a feed.
+        st = self._state([[0, 0, 0, 0], [24, 0, 0, 0], [24, 0, 0, 0], [48, 1, 0, 0]],
+                         ["right"])
+        self.assertTrue(compiler.compile_state(st)["options"]["right"]["second_max_pair_exists"])
+        # same shape with a single 24 -> no pair
+        st = self._state([[0, 0, 0, 0], [24, 0, 0, 0], [48, 1, 0, 0], [0, 0, 0, 0]],
+                         ["right"])
+        self.assertFalse(compiler.compile_state(st)["options"]["right"]["second_max_pair_exists"])
+
+    def test_c3_second_max_pair_single_distinct_value(self):
+        # only one distinct value on the board (24s): use its own second pair
+        # post-slide — swipe down keeps both 24s side by side at row3.
+        st = self._state([[0, 0, 0, 0], [0, 0, 0, 0], [0, 24, 24, 0], [0, 0, 0, 0]],
+                         ["down"])
+        self.assertTrue(compiler.compile_state(st)["options"]["down"]["second_max_pair_exists"])
+
+    def test_c3_criterion_line_renders_new_facts(self):
+        out = compiler.compile_state(SAMPLE_STATE)
+        line = compiler.criterion_line("up", out["options"]["up"])
+        self.assertIn("spawn-edge empties 4", line)
+        self.assertIn("big tile stranded on spawn edge no", line)
+        self.assertIn("isolated big tiles left after", line)
+        self.assertIn("second-biggest tile pair on board no", line)
+        self.assertNotIn("grid", line)
+
+    def test_c3_criterion_line_renders_none_as_na(self):
+        f = dict(compiler.compile_state(SAMPLE_STATE)["options"]["up"])
+        for k in ("spawn_edge_empties", "spawn_edge_has_big",
+                  "isolated_big_after", "second_max_pair_exists"):
+            f[k] = None
+        line = compiler.criterion_line("up", f)
+        self.assertIn("spawn-edge empties n/a", line)
+        self.assertIn("big tile stranded on spawn edge n/a", line)
+        self.assertIn("n/a isolated big tiles left after", line)
+        self.assertIn("second-biggest tile pair on board n/a", line)
 
 
 # ---------------- fallback policy (AC 2c, 2d) ----------------

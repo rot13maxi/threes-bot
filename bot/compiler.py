@@ -151,27 +151,101 @@ def _chain_pairs_after(next_grid):
     return n
 
 
+def _max_tile_cell(grid, max_tile):
+    """(row, col) of the max tile, first in row-major order; None if empty."""
+    if not max_tile:
+        return None
+    for r in range(SIZE):
+        for c in range(SIZE):
+            if grid[r][c] == max_tile:
+                return (r, c)
+    return None
+
+
+def _pin_dirs(pos):
+    """Directions whose swipe can never displace a tile sitting at ``pos``:
+    swiping toward an edge the tile already occupies leaves that tile in
+    place (corner (0,0) -> up,left; middle -> []). Order: up,left,down,right.
+    """
+    if pos is None:
+        return []
+    r, c = pos
+    dirs = []
+    if r == 0:
+        dirs.append("up")
+    if c == 0:
+        dirs.append("left")
+    if r == SIZE - 1:
+        dirs.append("down")
+    if c == SIZE - 1:
+        dirs.append("right")
+    return dirs
+
+
+def _isolated_big_after(next_grid):
+    """Tiles v >= 3 with NO orthogonally adjacent merge partner in the
+    post-slide grid (pre-spawn). For v >= 3 the only partner is an adjacent
+    equal value (equal double, lib/engine.js); 1s and 2s are never counted.
+    """
+    n = 0
+    for r in range(SIZE):
+        for c in range(SIZE):
+            v = next_grid[r][c]
+            if v < 3:
+                continue
+            if ((r > 0 and next_grid[r - 1][c] == v) or
+                    (r + 1 < SIZE and next_grid[r + 1][c] == v) or
+                    (c > 0 and next_grid[r][c - 1] == v) or
+                    (c + 1 < SIZE and next_grid[r][c + 1] == v)):
+                continue
+            n += 1
+    return n
+
+
+def _second_max_pair_exists(grid, next_grid):
+    """True when the post-slide layout carries >=2 cells of the board's
+    second-largest distinct tile value — the feed for the next big merge.
+
+    The value is picked from the PRE-slide board (the slide itself can
+    change what the max is); when the board holds only one distinct value,
+    that same value is used and we ask for a fresh pair of it post-slide.
+    """
+    vals = set(v for row in grid for v in row if v)
+    if not vals:
+        return False
+    top = max(vals)
+    below = [v for v in vals if v < top]
+    second = max(below) if below else top
+    return sum(1 for row in next_grid for v in row if v == second) >= 2
+
+
 def compile_state(state):
     """compile_state(state) -> facts dict (pure, deterministic, no `grid`).
 
-    Board facts: max_tile, score, empty_count, corner_values, worst_tile_count.
+    Board facts: max_tile, max_tile_pos, max_tile_pin_dirs, score,
+    empty_count, corner_values, worst_tile_count, worst_tile_value.
     Per legal direction (only from state["validMoves"]): moves, merges,
     merge_counts_by_value, max_tile_mergeable, empty_before, empty_after,
     new_worst_row, new_worst_col, sum_of_edges_opposite, edge_worst_count,
-    next_spawn_value.
+    next_spawn_value, spawn_edge_empties, spawn_edge_has_big,
+    isolated_big_after, second_max_pair_exists.
     """
     grid = state["grid"]
     max_tile = max([v for row in grid for v in row] or [0])
     empty_before = sum(1 for row in grid for v in row if v == 0)
     worst_vals = [v for row in grid for v in row if v]
     worst_val = min(worst_vals) if worst_vals else None
+    mt_pos = _max_tile_cell(grid, max_tile)
     board = {
         "max_tile": max_tile,
+        "max_tile_pos": (list(mt_pos) if mt_pos else None),
+        "max_tile_pin_dirs": _pin_dirs(mt_pos),
         "score": state["score"],
         "empty_count": empty_before,
         "corner_values": [grid[0][0], grid[0][SIZE - 1],
                           grid[SIZE - 1][0], grid[SIZE - 1][SIZE - 1]],
         "worst_tile_count": (worst_vals.count(worst_val) if worst_val else 0),
+        "worst_tile_value": worst_val,
     }
     queue = state.get("queue") or []
     next_spawn = queue[0] if queue else None
@@ -213,6 +287,11 @@ def compile_state(state):
                 if worst_val is not None and (grid[fr][fc] == worst_val
                                               or grid[tr][tc] == worst_val):
                     worst_companion = True
+        # --- C3 facts -----------------------------------------------------
+        # spawn-edge flexibility + stranded big tiles, judged on the post-slide
+        # layout (pre-spawn), where the engine forces the next tile in
+        spawn_empties = sum(1 for (r, c) in edge if next_grid[r][c] == 0)
+        spawn_big = any(next_grid[r][c] > 6 for (r, c) in edge)
         options[d] = {
             "moves": len(steps),
             "merges": len([s for s in steps if s[4]]),
@@ -229,6 +308,10 @@ def compile_state(state):
             "worst_tile_companion": worst_companion,
             "max_tile_displaced": max_displaced,
             "chain_pairs_after": _chain_pairs_after(next_grid),
+            "spawn_edge_empties": spawn_empties,
+            "spawn_edge_has_big": spawn_big,
+            "isolated_big_after": _isolated_big_after(next_grid),
+            "second_max_pair_exists": _second_max_pair_exists(grid, next_grid),
         }
     return {"board": board, "options": options}
 
@@ -256,4 +339,15 @@ def criterion_line(dir, facts):
     parts.append("max tile displaced %s" %
                  ("YES" if facts["max_tile_displaced"] else "no"))
     parts.append("%d mergeable equal pairs left after" % facts["chain_pairs_after"])
+    # --- C3 lines (spawn flexibility, stranding, next-big feed) ----------
+    se = facts["spawn_edge_empties"]
+    parts.append("spawn-edge empties %s" % ("n/a" if se is None else se))
+    sb = facts["spawn_edge_has_big"]
+    parts.append("big tile stranded on spawn edge %s" %
+                 ("n/a" if sb is None else ("YES" if sb else "no")))
+    ib = facts["isolated_big_after"]
+    parts.append("%s isolated big tiles left after" % ("n/a" if ib is None else ib))
+    sp = facts["second_max_pair_exists"]
+    parts.append("second-biggest tile pair on board %s" %
+                 ("n/a" if sp is None else ("YES" if sp else "no")))
     return "%s: %s" % (dir, ", ".join(parts))
