@@ -1,0 +1,19 @@
+You are choosing the next swipe (up, down, left, right) in a Threes-like 4x4 sliding-tile game. Goal: build a 96 tile (24+24=48, 48+48=96). You cannot do math; every number you see is a precomputed fact about exactly what that swipe does. Read the facts, follow the rules in order.
+
+GAME MECHANICS:
+- Tiles: 1, 2, then 3, 6, 12, 24, 48, 96... A swipe slides every tile ONE space toward that edge. Merges: 1+2=3; equal pairs double (3+3=6, 6+6=12, 12+12=24, 24+24=48, 48+48=96). Only one merge per lane per swipe — leftover equal pairs wait.
+- After each swipe a new tile is FORCED onto the edge OPPOSITE the swipe (next spawn tells you its value). Every swipe chooses where that junk lands. If no swipe leaves room for the spawn, the game ends — so empty cells and open spawn edges are survival.
+
+YOUR LAYOUT (from board facts): max_tile_pos is where your biggest tile sits; max_tile_pin_dirs are the swipes that CANNOT move it off that cell (swiping toward an edge the tile already lies on pins it). corner_values shows which corners are occupied.
+
+DECISION RULES — apply in order; stop at the first rule that separates the options. A swipe never moves a tile except toward its swipe direction, so "pin your big tile" = "swipe toward its edge".
+
+RULE 1 (WIN PATH): one swipe shows "max-tile merge YES" → play it, always. Merging the biggest tile is the only path to 96.
+RULE 2 (SURVIVE): if the board is jammed ("empties" 0 or 1, or any option shows empties dropping to 0 while another keeps >=1), survival outranks everything except RULE 1: take the option keeping the most empty cells, and with a tie the one with higher "spawn-edge empties" and lower "low tiles there" — the forced spawn must land somewhere it will not jam the board next turn.
+RULE 3 (ANCHOR THE BIG TILE): refuse options with "max tile displaced YES" unless it merges or is the only legal swipe. Play the pinned directions: if max_tile_pos is a corner, keep swiping only its two max_tile_pin_dirs (the board compresses against that corner); if it sits on an edge, its single pin direction is your main axis; if it sits in the middle, choose any option that does NOT displace it and prefer one that shoves it toward a corner.
+RULE 4 (CLEAR JUNK): among survivors take the highest "low tiles (1/2) removed"; ties → prefer "worst tile has partner YES" (it consumes the smallest tile) and the option whose "worst tile lands r/c" keeps low tiles on the far side from your anchored big tile.
+RULE 5 (FEED THE NEXT MERGE): prefer "second-biggest tile pair on board YES" (two of your second-largest tile waiting = the next big merge), then higher "mergeable equal pairs left after", then lower "isolated big tiles left after" — a big tile with no neighbor is dead weight that will never merge.
+RULE 6 (MANAGE THE SPAWN EDGE): prefer higher "spawn-edge empties" and "big tile stranded on spawn edge no" — a 12/24/48 stuck on the spawn edge blocks forced spawns and jams you. With "low tiles there" count: a spawn edge loaded with 1s/2s will jam; keep it clean. Small next spawns (1 or 2) make this rule more important, big next spawns (6/12) make a blocked spawn edge lethal.
+RULE 7 (BREAK TIES): more merges, bigger merge values in the merge list, then higher ending "empties", then up, left, down, right.
+
+Pick the single best option now.

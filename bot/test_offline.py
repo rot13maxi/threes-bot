@@ -47,7 +47,9 @@ D5_KEYS = ("moves", "merges", "merge_counts_by_value", "max_tile_mergeable",
            "max_tile_displaced", "chain_pairs_after",
            # C3 additions
            "spawn_edge_empties", "spawn_edge_has_big",
-           "isolated_big_after", "second_max_pair_exists")
+           "isolated_big_after", "second_max_pair_exists",
+           # D6 additions (per-option max-tile anchoring)
+           "pins_max_tile", "anchor_kept", "max_tile_corner_after")
 D5_BOARD_KEYS = ("max_tile", "max_tile_pos", "max_tile_pin_dirs",
                  "score", "empty_count", "corner_values",
                  "worst_tile_count", "worst_tile_value")
@@ -268,6 +270,123 @@ class CompilerFacts(unittest.TestCase):
         self.assertIn("big tile stranded on spawn edge n/a", line)
         self.assertIn("n/a isolated big tiles left after", line)
         self.assertIn("second-biggest tile pair on board n/a", line)
+
+    # --- D6: per-option max-tile pin / anchor facts ----------------------
+
+    def test_d6_corner_max_tile_pins_and_anchor(self):
+        # 48 anchored at (0,0) with a spare 3; junk tile at (3,2) keeps every
+        # swipe legal. up/left swipe toward the tile's own edges => pinned.
+        out = compiler.compile_state(self._state(
+            [[48, 3, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 1, 0]],
+            ["up", "left", "down", "right"]))
+        o = out["options"]
+        self.assertEqual(out["board"]["max_tile_pin_dirs"], ["up", "left"])
+        for d in ("up", "left"):
+            self.assertTrue(o[d]["pins_max_tile"], d)
+            self.assertTrue(o[d]["anchor_kept"], d)        # unmoved + corner
+            self.assertFalse(o[d]["max_tile_displaced"], d)
+            self.assertTrue(o[d]["max_tile_corner_after"], d)
+        for d in ("down", "right"):
+            self.assertFalse(o[d]["pins_max_tile"], d)
+            self.assertFalse(o[d]["anchor_kept"], d)       # tile got dragged
+            self.assertTrue(o[d]["max_tile_displaced"], d)
+            self.assertFalse(o[d]["max_tile_corner_after"], d)
+
+    def test_d6_midboard_max_tile_never_pins(self):
+        # 48 at (1,1): no pin dirs at all, every legal swipe drags it
+        out = compiler.compile_state(self._state(
+            [[0, 0, 0, 0], [0, 48, 0, 0], [0, 0, 0, 0], [1, 0, 2, 0]],
+            ["up", "left", "down", "right"]))
+        self.assertEqual(out["board"]["max_tile_pin_dirs"], [])
+        for d, f in out["options"].items():
+            self.assertFalse(f["pins_max_tile"], d)
+            self.assertTrue(f["max_tile_displaced"], d)      # every dir drags it
+            self.assertFalse(f["anchor_kept"], d)
+            self.assertFalse(f["max_tile_corner_after"], d)
+
+    def test_d6_unmoved_midboard_max_tile_is_not_anchored(self):
+        # up-swipe: 48 at (1,1) is blocked by the 1 above it -> unmoved, but
+        # it never sat on a corner => anchor kept no
+        out = compiler.compile_state(self._state(
+            [[0, 1, 0, 0], [0, 48, 0, 0], [0, 0, 0, 0], [0, 0, 0, 2]],
+            ["up"]))["options"]["up"]
+        self.assertFalse(out["pins_max_tile"])
+        self.assertFalse(out["max_tile_displaced"])
+        self.assertFalse(out["anchor_kept"])
+        self.assertFalse(out["max_tile_corner_after"])
+
+    def test_d6_corner_after_edge_tile_to_corner(self):
+        # 48 at (0,1): swipe left pushes it INTO corner (0,0)
+        out = compiler.compile_state(self._state(
+            [[0, 48, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 1, 0]],
+            ["left", "up"]))
+        left = out["options"]["left"]
+        self.assertFalse(left["pins_max_tile"])            # (0,1) pins "up" only
+        self.assertTrue(left["max_tile_displaced"])
+        self.assertFalse(left["anchor_kept"])              # moved without merging
+        self.assertTrue(left["max_tile_corner_after"])     # lands on (0,0)
+        # up: 48 pinned in place at (0,1) — an edge cell, not a corner
+        up = out["options"]["up"]
+        self.assertTrue(up["pins_max_tile"])
+        self.assertFalse(up["max_tile_displaced"])
+        self.assertFalse(up["anchor_kept"])
+        self.assertFalse(up["max_tile_corner_after"])
+
+    def test_d6_corner_after_midboard_up_land_not_corner(self):
+        # 48 at (1,1) swiped up lands (0,1): edge cell, not a corner
+        out = compiler.compile_state(self._state(
+            [[0, 0, 0, 0], [0, 48, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
+            ["up"]))["options"]["up"]
+        self.assertTrue(out["max_tile_displaced"])
+        self.assertFalse(out["anchor_kept"])
+        self.assertFalse(out["max_tile_corner_after"])
+
+    def test_d6_max_merge_anchors_into_corner(self):
+        # [48,48,0,0] swiped left merges at (3,0): merged tile counts as the
+        # max tile's cell, and (3,0) is a corner => both flags True
+        out = compiler.compile_state(self._state(
+            [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [48, 48, 0, 0]],
+            ["left", "right"]))
+        left = out["options"]["left"]
+        self.assertTrue(left["max_tile_mergeable"])
+        self.assertTrue(left["anchor_kept"])
+        self.assertTrue(left["max_tile_corner_after"])
+        # right: the 48s only cascade one cell each ([_,48,48,_]) — no merge
+        right = out["options"]["right"]
+        self.assertFalse(right["max_tile_mergeable"])
+        self.assertFalse(right["anchor_kept"])
+        self.assertFalse(right["max_tile_corner_after"])
+
+    def test_d6_subthree_max_tile_anchor_trivially_true(self):
+        # max tile 1: nothing to anchor yet -> both anchor facts True
+        out = compiler.compile_state(self._state(
+            [[1, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
+            ["down"]))["options"]["down"]
+        self.assertTrue(out["anchor_kept"])
+        self.assertTrue(out["max_tile_corner_after"])
+
+    def test_d6_criterion_line_leads_with_decisive_facts(self):
+        out = compiler.compile_state(SAMPLE_STATE)
+        line = compiler.criterion_line("up", out["options"]["up"])
+        for phrase in ("max-tile merge", "pins max tile", "max tile displaced",
+                       "anchor kept", "big tile in corner after",
+                       "low tiles (1/2) removed", "tiles move"):
+            self.assertIn(phrase, line)
+        idx = [line.index(p) for p in
+               ("max-tile merge", "pins max tile", "max tile displaced",
+                "anchor kept", "big tile in corner after",
+                "low tiles (1/2) removed", "tiles move")]
+        self.assertEqual(idx, sorted(idx))
+        self.assertNotIn("grid", line)
+
+    def test_d6_criterion_line_renders_anchor_facts_none_as_na(self):
+        f = dict(compiler.compile_state(SAMPLE_STATE)["options"]["up"])
+        for k in ("pins_max_tile", "anchor_kept", "max_tile_corner_after"):
+            f[k] = None
+        line = compiler.criterion_line("up", f)
+        self.assertIn("pins max tile n/a", line)
+        self.assertIn("anchor kept n/a", line)
+        self.assertIn("big tile in corner after n/a", line)
 
 
 # ---------------- fallback policy (AC 2c, 2d) ----------------

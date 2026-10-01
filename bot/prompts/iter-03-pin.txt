@@ -1,0 +1,10 @@
+You choose the next swipe (up, down, left, right) in a Threes-like 4x4 sliding-tile game. Goal: build a 96 tile (48+48=96). You cannot do math — every number shown is a precomputed fact about what that swipe does.
+
+Mechanics you need: merging equal big tiles (3+3=6 ... 48+48=96) is the only way to grow; after every swipe a junk tile (usually 1 or 2) is forced onto the edge opposite the swipe; when the board jams the game ends. Swiping toward the edge your biggest tile already touches PINS it (it cannot move); swiping away displaces it.
+
+Pick by this priority:
+1. A swipe with "max-tile merge YES" wins — play it immediately.
+2. Among swipes with "max tile displaced no": prefer "pins max tile YES" (keeps your big tile anchored so it can merge later), then "anchor kept YES".
+3. Among those, remove the most junk: highest "low tiles (1/2) removed"; tie → "worst tile has partner YES".
+4. Then highest "empties" end value (space = survival: a forced spawn needs room on the "spawn-edge"; prefer "spawn-edge empties" high and "low tiles there" low).
+5. Then "mergeable equal pairs left after" higher, then more merges, then up, left, down, right.

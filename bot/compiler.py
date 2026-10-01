@@ -10,6 +10,8 @@ Python 3.9 stdlib only.
 SIZE = 4
 DIRS = ("up", "left", "down", "right")
 
+_CORNERS = ((0, 0), (0, SIZE - 1), (SIZE - 1, 0), (SIZE - 1, SIZE - 1))
+
 
 def merge_result(a, b):
     """Mirror of lib/engine.js mergeResult: 1+2->3, v+v->2v for v = 3*2^k."""
@@ -228,7 +230,20 @@ def compile_state(state):
     merge_counts_by_value, max_tile_mergeable, empty_before, empty_after,
     new_worst_row, new_worst_col, sum_of_edges_opposite, edge_worst_count,
     next_spawn_value, spawn_edge_empties, spawn_edge_has_big,
-    isolated_big_after, second_max_pair_exists.
+    isolated_big_after, second_max_pair_exists, pins_max_tile, anchor_kept,
+    max_tile_corner_after.
+
+    pins_max_tile: True when this swipe is one of the board-level
+    max_tile_pin_dirs (computed from the PRE-slide max-tile position), i.e.
+    it can never drag the max tile off its cell. Empty board -> False.
+    anchor_kept: True when the max tile ends the slide anchored: a merge
+    step involves a max-tile cell, or the tile does not move at all and
+    already sits on a corner cell. A board whose max tile is below 3 has
+    nothing to anchor yet, so anchor_kept is trivially True there.
+    max_tile_corner_after: True when the max tile's POST-slide cell (its
+    merge destination if it merged — the merged tile counts as the max
+    tile's cell even though its value grew) is a corner. Max tile < 3 ->
+    True (nothing to anchor yet).
     """
     grid = state["grid"]
     max_tile = max([v for row in grid for v in row] or [0])
@@ -292,6 +307,37 @@ def compile_state(state):
         # layout (pre-spawn), where the engine forces the next tile in
         spawn_empties = sum(1 for (r, c) in edge if next_grid[r][c] == 0)
         spawn_big = any(next_grid[r][c] > 6 for (r, c) in edge)
+        # --- anchor facts (per-option max-tile pinning) --------------------
+        # pins_max_tile: this swipe is one of the board-level pin dirs for
+        # the CURRENT (pre-slide) max-tile position, so it can never drag
+        # the max tile off its cell. Empty board -> no pin dirs -> False.
+        pins_max = d in board["max_tile_pin_dirs"]
+        # --- anchor_kept / max_tile_corner_after ---------------------------
+        # follow the max tile (first row-major copy) through the slide:
+        # a tile moves at most one cell, and a merge step lands it on the
+        # merged cell (the stationary destination when it merges INTO it).
+        mt_after = mt_pos
+        mt_merged = False
+        for (fr, fc, tr, tc, mg, _v) in steps:
+            if (fr, fc) == mt_pos:
+                mt_after = (tr, tc)
+                if mg:
+                    mt_merged = True
+            elif mg and (tr, tc) == mt_pos:
+                mt_merged = True
+        # anchor_kept: the max tile ends the slide anchored — it merged, or
+        # it never moved at all and already sat on a corner. Max tile < 3
+        # means there is nothing to anchor yet, so it is trivially True.
+        # max_tile_corner_after: the max tile's post-slide cell is a corner
+        # (the merged cell counts even though the merged value is bigger);
+        # also trivially True for a max tile < 3.
+        if max_tile < 3:
+            anchor_kept = True
+            corner_after = True
+        else:
+            anchor_kept = mt_merged or (mt_after == mt_pos
+                                        and mt_pos in _CORNERS)
+            corner_after = mt_after in _CORNERS
         options[d] = {
             "moves": len(steps),
             "merges": len([s for s in steps if s[4]]),
@@ -312,6 +358,9 @@ def compile_state(state):
             "spawn_edge_has_big": spawn_big,
             "isolated_big_after": _isolated_big_after(next_grid),
             "second_max_pair_exists": _second_max_pair_exists(grid, next_grid),
+            "pins_max_tile": pins_max,
+            "anchor_kept": anchor_kept,
+            "max_tile_corner_after": corner_after,
         }
     return {"board": board, "options": options}
 
@@ -319,7 +368,24 @@ def compile_state(state):
 def criterion_line(dir, facts):
     """One-line factual summary for the Jev choice question (D10)."""
     parts = []
-    parts.append("%d tiles move" % facts["moves"])
+    # Decisive facts FIRST: the fast model weighs the start of the line
+    # most, so the max-tile anchoring block leads.
+    parts.append("max-tile merge %s" % ("YES" if facts["max_tile_mergeable"] else "no"))
+    pm = facts["pins_max_tile"]
+    parts.append("pins max tile %s" %
+                 ("n/a" if pm is None else ("YES" if pm else "no")))
+    md = facts["max_tile_displaced"]
+    parts.append("max tile displaced %s" %
+                 ("n/a" if md is None else ("YES" if md else "no")))
+    ak = facts["anchor_kept"]
+    parts.append("anchor kept %s" %
+                 ("n/a" if ak is None else ("YES" if ak else "no")))
+    bc = facts["max_tile_corner_after"]
+    parts.append("big tile in corner after %s" %
+                 ("n/a" if bc is None else ("YES" if bc else "no")))
+    parts.append("%d low tiles (1/2) removed, worst tile has partner %s" %
+                 (facts["worst_tiles_removed"],
+                  "YES" if facts["worst_tile_companion"] else "no"))
     if facts["merges"]:
         mc = ", ".join("%d x%d" % (v, c)
                        for (v, c) in sorted(facts["merge_counts_by_value"].items()))
@@ -327,27 +393,22 @@ def criterion_line(dir, facts):
     else:
         parts.append("0 merges")
     parts.append("empties %d->%d" % (facts["empty_before"], facts["empty_after"]))
-    parts.append("max-tile merge %s" % ("YES" if facts["max_tile_mergeable"] else "no"))
-    if facts["new_worst_row"] is not None:
-        parts.append("worst tile lands r%d c%d" % (facts["new_worst_row"], facts["new_worst_col"]))
-    parts.append("spawn-edge sum %d, low tiles there %d" %
-                 (facts["sum_of_edges_opposite"], facts["edge_worst_count"]))
-    parts.append("next spawn %s" % facts["next_spawn_value"])
-    parts.append("%d low tiles (1/2) removed, worst tile has partner %s" %
-                 (facts["worst_tiles_removed"],
-                  "YES" if facts["worst_tile_companion"] else "no"))
-    parts.append("max tile displaced %s" %
-                 ("YES" if facts["max_tile_displaced"] else "no"))
-    parts.append("%d mergeable equal pairs left after" % facts["chain_pairs_after"])
     # --- C3 lines (spawn flexibility, stranding, next-big feed) ----------
     se = facts["spawn_edge_empties"]
     parts.append("spawn-edge empties %s" % ("n/a" if se is None else se))
+    parts.append("spawn-edge sum %d, low tiles there %d" %
+                 (facts["sum_of_edges_opposite"], facts["edge_worst_count"]))
     sb = facts["spawn_edge_has_big"]
     parts.append("big tile stranded on spawn edge %s" %
                  ("n/a" if sb is None else ("YES" if sb else "no")))
-    ib = facts["isolated_big_after"]
-    parts.append("%s isolated big tiles left after" % ("n/a" if ib is None else ib))
+    parts.append("next spawn %s" % facts["next_spawn_value"])
+    parts.append("%d mergeable equal pairs left after" % facts["chain_pairs_after"])
     sp = facts["second_max_pair_exists"]
     parts.append("second-biggest tile pair on board %s" %
                  ("n/a" if sp is None else ("YES" if sp else "no")))
+    ib = facts["isolated_big_after"]
+    parts.append("%s isolated big tiles left after" % ("n/a" if ib is None else ib))
+    parts.append("%d tiles move" % facts["moves"])
+    if facts["new_worst_row"] is not None:
+        parts.append("worst tile lands r%d c%d" % (facts["new_worst_row"], facts["new_worst_col"]))
     return "%s: %s" % (dir, ", ".join(parts))
