@@ -221,6 +221,68 @@ def _second_max_pair_exists(grid, next_grid):
     return sum(1 for row in next_grid for v in row if v == second) >= 2
 
 
+def _advance_possible(grid, dir):
+    """True when at least one tile can ADVANCE in ``dir``: slide into an
+    empty cell or merge. Pure lane-geometry mirror of lib/engine.js
+    _laneSteps minus the spawn-edge-empty gate (that gate is already
+    satisfied once the forced spawn has landed, so a post-spawn board's
+    survival is exactly "some lane can advance").
+    """
+    for lane in _lane_cells(grid, dir):
+        moved = [False] * SIZE
+        for i in range(1, SIZE):
+            fr, fc = lane[i]
+            f = grid[fr][fc]
+            if f == 0:
+                continue
+            tr, tc = lane[i - 1]
+            t = grid[tr][tc]
+            if moved[i - 1] or t == 0 or merge_result(t, f) is not None:
+                return True
+    return False
+
+
+def _min_wiggles_after_spawn(next_grid, dir, spawn_value):
+    """Worst-case survival count after the forced spawn of this swipe.
+
+    Enumerates every cell the engine COULD drop the next tile on (each
+    empty cell of the edge opposite the swipe — the same cell set as
+    ``_opposite_edge_cells(dir)`` intersected with empties of the
+    post-slide board), places ``spawn_value`` there, and counts how many
+    of the four directions still have at least one tile able to advance
+    (a "wiggle"). Returns the MINIMUM over placements — the worst-case
+    random spawn: 0 = next-turn death trap, 1 = knife edge, 3+ = safe.
+    None when no placement cell exists (cannot happen for a legal move).
+    """
+    worst = None
+    for (r, c) in _opposite_edge_cells(dir):
+        if next_grid[r][c] != 0:
+            continue
+        g = [row[:] for row in next_grid]
+        g[r][c] = spawn_value
+        wiggles = sum(1 for d in DIRS if _advance_possible(g, d))
+        worst = wiggles if worst is None else min(worst, wiggles)
+    return worst
+
+
+def _second_max_count(grid, next_grid):
+    """Count of cells carrying the board's second-largest DISTINCT tile
+    value on the post-slide layout (pre-spawn).
+
+    The value is picked from the PRE-slide board exactly like
+    ``_second_max_pair_exists``; when the board holds only one distinct
+    value, that value's own post-slide count is returned. 1 = a lone
+    runner-up waiting for its partner, 2+ = merge-ready.
+    """
+    vals = set(v for row in grid for v in row if v)
+    if not vals:
+        return 0
+    top = max(vals)
+    below = [v for v in vals if v < top]
+    second = max(below) if below else top
+    return sum(1 for row in next_grid for v in row if v == second)
+
+
 def compile_state(state):
     """compile_state(state) -> facts dict (pure, deterministic, no `grid`).
 
@@ -231,7 +293,15 @@ def compile_state(state):
     new_worst_row, new_worst_col, sum_of_edges_opposite, edge_worst_count,
     next_spawn_value, spawn_edge_empties, spawn_edge_has_big,
     isolated_big_after, second_max_pair_exists, pins_max_tile, anchor_kept,
-    max_tile_corner_after.
+    min_wiggles_after_spawn, second_max_count.
+
+    min_wiggles_after_spawn: worst case over every possible landing cell
+    of the forced next tile (post-slide, empty cells of the spawn edge),
+    of how many directions can still advance a tile on the spawned board
+    — the congestion signal: 0 = death trap next turn, 1 = knife edge,
+    3+ = safe. second_max_count: cells of the second-largest distinct
+    tile value left after the slide (count of that value itself when the
+    board carries only one distinct value).
 
     pins_max_tile: True when this swipe is one of the board-level
     max_tile_pin_dirs (computed from the PRE-slide max-tile position), i.e.

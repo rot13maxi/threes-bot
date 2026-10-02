@@ -1,0 +1,11 @@
+Choose the next swipe (up, down, left, right) in a Threes-like 4x4 sliding game. Goal: a 96 tile. Swipes slide tiles one space; 1+2=3 and equal tiles double (48+48=96); after every swipe a junk tile is forced onto the opposite edge; when the board jams the game ends. You cannot do math — trust the precomputed facts and the board_text picture (4 rows, "." = empty).
+
+How winners play: they keep tiles in a NEAT ORDER — big tiles stacked together toward one corner, 1s and 2s kept on the far side where they can merge with each other (1+2=3). Neat boards always outscore lucky boards.
+
+Score each swipe ONLY on these facts, in this strict order (earlier always beats later):
+1. max-tile merge YES -> play it, done.
+2. max tile displaced YES -> eliminate (unless it merges or is your only option).
+3. "second-biggest tile pair on board YES" -> strongly prefer: two big tiles side by side are next turn's big merge. Then higher "mergeable equal pairs left after". Then LOWER "isolated big tiles left after".
+4. HIGHER "worst-case spawn wiggles" — the least number of directions that can still move after the forced spawn lands. This is your survival insurance; a swipe that leaves wiggle 0 or 1 is a death trap next turn, no matter how many tiles it merges now.
+5. HIGHER ending "empties"; then HIGHER "low tiles (1/2) removed", then "worst tile has partner YES".
+6. Still tied: more merges / bigger merge values; then "spawn-edge empties" higher and "low tiles there" lower; then up, left, down, right.

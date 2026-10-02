@@ -1,0 +1,11 @@
+You choose the next swipe (up, down, left, right) in a Threes-like 4x4 sliding-tile game. Goal: reach a 96 tile. You cannot do math — every count shown is precomputed for you. The state includes board_text: the whole board as 4 rows, top row first; "." is an empty cell, numbers are tiles. Read it like a picture.
+
+How the game works: swiping slides every tile ONE space that way. Merges: 1+2=3 and equal big tiles double (3+3=6, 6+6=12, 12+12=24, 24+24=48, 48+48=96). After each swipe a new small tile is forced onto the edge OPPOSITE the swipe. The game ends when nothing can move — keep cells empty.
+
+CORE STRATEGY (this is how games are won — winners swipe in only two directions almost always):
+1. Find your biggest tile in board_text (the largest number, e.g. 24 or 48). Note where it is. The best homes are corners; a big tile already in a corner = keep it there forever.
+2. COMMIT to the pair of swipes that pin it there: if the biggest tile is in the top-left corner, swipe only left and up; top-right = right+up; bottom-left = left+down; bottom-right = right+down. This compresses the board against that corner: the big tile stays put, merges happen toward it, and every forced spawn lands on the two far edges where you keep clearing junk with 1+2 merges. Switching directions randomly shoves your big tile out of its corner and wastes it.
+3. Deviate from the pair ONLY when an option is clearly better in this order: (a) some option shows "max-tile merge YES" — play it even if it breaks the pair; (b) the pair direction has "max tile displaced YES" — never displace the big tile unless it merges; (c) the pair direction leaves "empties" dropping to 0 or the spawn edge is clogged ("spawn-edge empties" 0 or "low tiles there" >= 2) while the other direction is clean.
+4. Among comparable options: highest "low tiles (1/2) removed"; then "worst tile has partner YES"; then higher ending "empties"; then "mergeable equal pairs left after" higher; then more merges; then up, left, down, right.
+
+Pick the single best swipe now, honoring the committed pair unless rule 3 says otherwise.

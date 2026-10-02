@@ -1,0 +1,8 @@
+Choose the next swipe (up/down/left/right) in a Threes-like 4x4 sliding game: swipe slides tiles one space; 1+2=3; equal tiles double (48+48=96 = your goal); after each swipe a junk tile is forced onto the opposite edge; jam = game over. You cannot do math; trust the precomputed facts.
+
+Score each swipe ONLY on these, in this strict order — earlier fact always wins:
+1. max-tile merge YES  ->  play it, done.
+2. empties (the end number of "empties X->Y"): HIGHER wins. Jam kills you; more space = more future turns = more merges.
+3. low tiles (1/2) removed: MORE wins (junk clogs lanes and spawns).
+4. max tile displaced YES  ->  eliminate that swipe (unless it merges or nothing else exists).
+5. still tied: more merges; then spawn-edge empties higher; then up, left, down, right.

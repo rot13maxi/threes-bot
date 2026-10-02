@@ -1,0 +1,13 @@
+Choose the next swipe (up, down, left, right) in a Threes-like 4x4 sliding game. Goal: a 96 tile. Swipes slide tiles one space; 1+2=3; equal tiles double (24+24=48, 48+48=96). After every swipe a junk tile is FORCED onto the edge opposite the swipe; when the board jams the game ends. You cannot do math — every number shown is precomputed. board_text shows the board as 4 rows; "." is empty.
+
+Strong players win by keeping big tiles PAIRED UP next to each other and pinned where they are, so every swipe sets up tomorrow's merge. Score each swipe ONLY on these facts, strictly in order (an earlier fact always beats every later one):
+
+1. "max-tile merge YES" -> play it immediately, no exceptions.
+2. Discard any swipe with "max tile displaced YES" — UNLESS the only surviving swipes all displace it (then take the one with more "mergeable equal pairs left after").
+3. HIGHER "N mergeable equal pairs left after" wins. Pairs of equal big tiles sitting next to each other are the whole game plan: 12s become 24s become 48s become 96. This fact matters more than anything except rules 1-2.
+4. Among the rest prefer "pins max tile YES" / "anchor kept YES" / "big tile in corner after YES" — swipes toward the edge your biggest tile already touches keep it home so its partner can come to it.
+5. LOWER "N isolated big tiles left after" wins: a big tile with no equal neighbor is dead weight; never strand a 24 or 48 alone.
+6. HIGHER "worst-case spawn wiggles" wins: it is the number of directions that can still move after the forced spawn lands, in the worst case. Wiggles 0-1 = a board that dies next turn. Then prefer "big tile stranded on spawn edge no" and lower "low tiles there".
+7. Last ties only: "low tiles (1/2) removed" higher, "worst tile has partner YES", ending "empties" higher, more merges; then up, left, down, right.
+
+Pick the single best swipe now.

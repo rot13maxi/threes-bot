@@ -1,0 +1,72 @@
+Threes search-oracle run log — seeds 101-120, win = max_tile >= 96
+================================================================
+Engine mirror vs lib/engine.js: 376 states, 0 mismatches (node _search_oracle.js check)
+All policies deterministic (seeded LCGs only). Greedy baseline verified bit-exact
+vs bot/policy.py fallback_score on compiler-fact samples (85/45/505/250 case).
+
+TOP CONFIGS (expectimax, tuned weights TW = {empty:90, cramp:240, isoJr:25.2, jr:9.8}
+on classic 12-part eval: snake(alpha=0.82, value-weighted, best-of-8 corner snakes),
+mono, empties, cramp(<3 empties), chain(equal-pair), jr(1+2 pairs), iso-jr penalty,
+iso-big penalty, max-tile corner bonus, sub-tier merge-path bonus, stranded-edge-big,
+jr-in-corner):
+
+ex-t-d5-np : expectimax depth 5, FULL width (no dir pruning), 400k nodes/move -> 13/20, best 384 (~23 min/20 seeds)
+ex-t-d5-b2 : expectimax depth 5, 25%->15% dir prune, 600k nodes/move         -> 12/20, best 384 (~4 min/20 seeds)
+ex-t-d3    : expectimax depth 3, default weights, dir prune                   -> 12/20, best 192 (1.3 sec/20 seeds!)
+greedy     : policy.py fallback_score (baseline)                              ->  3/20, best 96
+mc-roll    : MC 25 rollouts/leg, seeded LCG (reference)                        -> 11/20, best 192
+
+per-seed max_tile (fresh runs, deterministic):
+seed   ex-t-d5-np  ex-t-d5-b2  ex-t-d3   TOP3-union
+101         192        192       96       192 WIN
+102          24         48       48        48
+103          48         48       48        48
+104         192        192       96       192 WIN
+105         192         48       24       192 WIN
+106          96         96       96        96 WIN
+107          24         24       24        24
+108          48         96       96        96 WIN
+109          96         96       96        96 WIN
+110          48         24       48        48
+111         192        192      192       192 WIN
+112         192        384      192       384 WIN
+113         192        384      192       384 WIN
+114          48         48       48        48
+115          48         48       48        48
+116         192        192      192       192 WIN
+117          96         48       48        96 WIN
+118          96         96       96        96 WIN
+119         384        192      192       384 WIN
+120         192        192       96       192 WIN
+TOP3 union: 14/20  (never: 102,103,107,110,114,115)
+
+UNION OVER ALL 16 CONFIGS TRIED (adds ex-t-d4-np, ex-t-d4-chain, ex-t-d4-space,
+ex-t-d6/d7/d8/d9, ex-hard-d3/d5 tuned-on-hard-seeds, ex-d4/d5/d5-empty/d5-chain,
+mc-roll, mc-roll-big, hyb-d3-roll, hyb-t-d3):
+union: 15/20  — never won by ANY config: 102, 103, 107, 110, 114  (candidate HARD seeds)
+(115 rescued by untuned ex-d5 / ex-d5-empty which hit 96 there.)
+These 5 seeds cap at 48 under: d3..d9 expectimax, hard-seed-tuned weights,
+best-of-16 tie-randomized d3, best-of-8 near-optimal (eps=120) d4-np, MC 60-rollout.
+They look genuinely near-unwinnable (spawn starvation, not policy error).
+
+Depth ladder (same weights): d3=12, d4=10-11, d5=11-13, d6=11, d7=11(5 in first 10),
+d8/d9 no gain on hard seeds -> depth sweet spot 3-5; deeper exploits eval noise.
+Worst-case (minimax) chance aggregation is terrible: 1-3/20. AVG is correct.
+Out-of-sample seeds 121-140 (weights tuned on 101-120): ex-t-d3 5/20 best 96;
+ex-t-d5-b2 8/20 best 192 — recipe generalizes, eval-set difficulty is seed-specific.
+
+DECISION SIGNALS (ex-t-d5-np vs policy.py greedy, 1417 diverged / 2411 moves = 59%):
+fact gains(chosen vs greedy)/losses:
+  iso_big(keep big tiles paired)      698 / 321   <- biggest discriminator
+  chain_pairs_after                    528 /   0
+  pins_max_tile                        444 /   0
+  min_wiggles_after_spawn (derived)    419 / 237
+  spawn_edge_clear (no big stranded)   349 /   -
+  max_tile_displaced avoided           223 / 156 (search sometimes moves max on purpose)
+  max_tile_corner_after                174 /  81
+  edge_worst_count (few 1/2 on edge)   130 /   0
+  second_max_pair_exists               138 / 168 (mixed)
+  sub-tier merge path (max/2 pair)     fires 20% of divergences, biggest avg delta (128)
+  empty_after / merges                  NEVER a reason to differ from greedy (0/0)
+Top flips: up->down 176, left->down 168, up->left 132 (greedy's fixed up/left priority
+is frequently overridden; merge count is NOT what separates the policies).
