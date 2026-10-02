@@ -28,7 +28,9 @@ except Exception:  # missing or broken planner file: simply no search facts
 _PLAN_TRIED = _PLANNER is not None
 
 PLANNER_DEPTH = 3                     # expectimax plies; 0 = disabled
-PLANNER_WALLCLOCK_S = 5.0             # a slower plan() call is dropped
+PLANNER_WALLCLOCK_S = 5.0             # depth<=3 guard; depth>=4 uses 20s
+PLANNER_WALLCLOCK_S_DEEP = 20.0       # d5 moves cost ~2s avg / ~4s worst
+PLANNER_DROP_COUNT = 0                # plan() calls skipped (diagnostics)
 _PLAN_PRIORITY = ("up", "left", "down", "right")  # fixed rank tie-break
 _PLAN_MISSING = -(10 ** 9)            # score for dirs the planner dropped
 _PLAN_DISABLED = False                # flipped by set_planner_depth(0)
@@ -353,13 +355,17 @@ def _plan_dir_scores(state, options):
     try:
         t0 = time.perf_counter()
         kwargs = {}
+        limit = PLANNER_WALLCLOCK_S
         if PLANNER_DEPTH >= 4:
             kwargs = {"node_budget": 400000, "prune_delta": 0.0}
+            limit = PLANNER_WALLCLOCK_S_DEEP
         scores = plan(state["grid"], list(state.get("queue") or []),
                       list(state["validMoves"]), depth=PLANNER_DEPTH,
                       **kwargs)
-        if time.perf_counter() - t0 > PLANNER_WALLCLOCK_S:
-            return None                     # too slow: treat as failure
+        if time.perf_counter() - t0 > limit:
+            global PLANNER_DROP_COUNT
+            PLANNER_DROP_COUNT += 1
+            return None                 # too slow: treat as failure
         return scores if isinstance(scores, dict) and scores else None
     except Exception:
         return None

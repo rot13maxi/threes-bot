@@ -145,7 +145,8 @@ def shard_worker(shard_index, nshards, workers_per, args_dict, instructions,
                 queue):
     """Runs in its OWN process (the expectimax planner is CPU-bound and the
     GIL serializes threads otherwise). Plays its seed slice sequentially on
-    workers_per local servers; returns (records, costs) via the queue."""
+    workers_per local servers; returns (records, costs, plan_drops) via the
+    queue so CPU-bound planner work escapes the GIL."""
     import argparse
     args = argparse.Namespace(**args_dict)
     my_seeds = [s for i, s in enumerate(args.seeds_list) if i % nshards == shard_index]
@@ -162,7 +163,8 @@ def shard_worker(shard_index, nshards, workers_per, args_dict, instructions,
         t.join()
     records = [r for w in workers for r in w.records]
     costs = [w.client.cost_usd() for w in workers if w.client is not None]
-    queue.put((records, costs))
+    import compiler as _comp
+    queue.put((records, costs, getattr(_comp, "PLANNER_DROP_COUNT", 0)))
 
 
 def summarize(records, args, seeds, instructions_path, costs):
@@ -253,8 +255,9 @@ def main(argv=None):
         collected = [queue.get() for _ in procs]
         for p in procs:
             p.join()
-        records = [r for recs, _c in collected for r in recs]
-        costs = [c for _r, cs in collected for c in cs]
+        records = [r for recs, _c, _d in collected for r in recs]
+        costs = [c for _r, cs, _d in collected for c in cs]
+        plan_drops = sum(d for _r, _c, d in collected)
     else:
         workers = [Worker(i, args, instructions) for i in range(workers_n)]
         buckets = chunk_round_robin(seeds, workers_n)
@@ -268,6 +271,7 @@ def main(argv=None):
             t.join()
         records = [r for w in workers for r in w.records]
         costs = [w.client.cost_usd() for w in workers if w.client is not None]
+        plan_drops = 0
     records.sort(key=lambda r: r.get("seed", 0))
 
     with open(jsonl_path, "a") as f:
@@ -285,7 +289,7 @@ def main(argv=None):
     print("best_score=%d mean_score=%.1f best_max_tile=%d"
           % (summary["best_score"], summary["mean_score"], summary["best_max_tile"]))
     print("sources: " + " ".join("%s=%d" % (k, summary["sources"][k]) for k in SOURCE_KEYS))
-    print("jev_cost_usd=%.6f" % summary["jev_cost_usd"])
+    print("jev_cost_usd=%.6f plan_drops=%d" % (summary["jev_cost_usd"], plan_drops))
     if summary["aborted"]:
         print("aborted=%d %s" % (len(summary["aborted"]),
                                  json.dumps(summary["aborted"], sort_keys=True)))
