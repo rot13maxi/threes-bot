@@ -51,7 +51,9 @@ D5_KEYS = ("moves", "merges", "merge_counts_by_value", "max_tile_mergeable",
            # D6 additions (per-option max-tile anchoring)
            "pins_max_tile", "anchor_kept", "max_tile_corner_after",
            # D11 additions (worst-case survival + runner-up supply count)
-           "min_wiggles_after_spawn", "second_max_count")
+           "min_wiggles_after_spawn", "second_max_count",
+           # planner additions (expectimax verdict per option)
+           "plan_score", "plan_rank", "plan_best")
 D5_BOARD_KEYS = ("max_tile", "max_tile_pos", "max_tile_pin_dirs",
                  "score", "empty_count", "corner_values",
                  "worst_tile_count", "worst_tile_value")
@@ -400,12 +402,14 @@ class CompilerFacts(unittest.TestCase):
     def test_d6_criterion_line_leads_with_decisive_facts(self):
         out = compiler.compile_state(SAMPLE_STATE)
         line = compiler.criterion_line("up", out["options"]["up"])
-        for phrase in ("max-tile merge", "pins max tile", "max tile displaced",
+        for phrase in ("plan rank", "max-tile merge", "pins max tile",
+                       "max tile displaced",
                        "anchor kept", "big tile in corner after",
                        "low tiles (1/2) removed", "tiles move"):
             self.assertIn(phrase, line)
         idx = [line.index(p) for p in
-               ("max-tile merge", "pins max tile", "max tile displaced",
+               ("plan rank", "max-tile merge", "pins max tile",
+                "max tile displaced",
                 "anchor kept", "big tile in corner after",
                 "low tiles (1/2) removed", "tiles move")]
         self.assertEqual(idx, sorted(idx))
@@ -600,6 +604,118 @@ class CompilerFacts(unittest.TestCase):
                             if ref_advance(h, dd))
                     worst = n if worst is None else min(worst, n)
                 self.assertEqual(mw, worst, (grid, d))
+
+
+# ---------------- planner facts in the compiled options ------------------
+
+class PlannerFacts(unittest.TestCase):
+    """compile_state() attaches the expectimax verdict per option so Jev
+    (which cannot do math) sees each swipe's search result. The planner is
+    deterministic, so these tests pin RELATIVE properties (rank structure,
+    determinism, gating), never absolute scores."""
+
+    # four legal dirs with strictly distinct depth-3 scores (verified):
+    #   up 99957, left 101866, down 96310, right -10**9 (root-pruned)
+    DISTINCT_BOARD = [[3, 1, 0, 0], [6, 0, 0, 0], [12, 0, 0, 0], [24, 0, 0, 2]]
+
+    def setUp(self):
+        self._saved_depth = compiler.get_planner_depth()
+
+    def tearDown(self):
+        compiler.set_planner_depth(self._saved_depth)
+
+    def _state(self, grid, valid):
+        st = json.loads(json.dumps(SAMPLE_STATE))
+        st["grid"] = [row[:] for row in grid]
+        st["validMoves"] = list(valid)
+        st["queue"] = [1, 2, 3]
+        return st
+
+    def test_plan_keys_present_on_every_legal_option(self):
+        out = compiler.compile_state(SAMPLE_STATE)
+        self.assertTrue(out["options"])
+        for d, f in out["options"].items():
+            self.assertIsInstance(f["plan_score"], int)
+            self.assertIsInstance(f["plan_rank"], int)
+            self.assertIsInstance(f["plan_best"], bool)
+        self.assertEqual(out["board"]["planner_depth"],
+                         self._saved_depth)
+
+    def test_ranks_are_a_permutation_of_1_to_n(self):
+        for grid in (SAMPLE_STATE["grid"], self.DISTINCT_BOARD):
+            out = compiler.compile_state(
+                self._state(grid, ["up", "left", "down", "right"]))
+            ranks = sorted(f["plan_rank"] for f in out["options"].values())
+            self.assertEqual(ranks, list(range(1, len(out["options"]) + 1)),
+                             grid)
+
+    def test_plan_best_unique_and_consistent_with_scores(self):
+        out = compiler.compile_state(
+            self._state(self.DISTINCT_BOARD,
+                        ["up", "left", "down", "right"]))
+        opts = out["options"]
+        best = [d for d, f in opts.items() if f["plan_best"]]
+        self.assertEqual(len(best), 1)
+        self.assertEqual(opts[best[0]]["plan_rank"], 1)
+        top = max(f["plan_score"] for f in opts.values())
+        self.assertEqual(opts[best[0]]["plan_score"], top)
+        # ranks respect score order: rank i score >= rank i+1 score
+        by_rank = sorted(opts.values(), key=lambda f: f["plan_rank"])
+        scores = [f["plan_score"] for f in by_rank]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+
+    def test_set_planner_depth_zero_drops_all_plan_keys(self):
+        compiler.set_planner_depth(0)
+        out = compiler.compile_state(SAMPLE_STATE)
+        self.assertTrue(out["options"])
+        for d, f in out["options"].items():
+            for k in ("plan_score", "plan_rank", "plan_best", "plan_total"):
+                self.assertNotIn(k, f, d)
+        self.assertNotIn("planner_depth", out["board"])
+        # the criterion line simply has no plan fragment to lead with
+        line = compiler.criterion_line("up", out["options"]["up"])
+        self.assertNotIn("plan rank", line)
+        self.assertTrue(line.startswith("up: max-tile merge"))
+        # restoring the depth brings the facts back
+        compiler.set_planner_depth(self._saved_depth)
+        out2 = compiler.compile_state(SAMPLE_STATE)
+        self.assertIn("plan_score", out2["options"]["up"])
+
+    def test_plan_facts_deterministic_repeat(self):
+        st = self._state(self.DISTINCT_BOARD,
+                         ["up", "left", "down", "right"])
+        a = compiler.compile_state(st)["options"]
+        b = compiler.compile_state(st)["options"]
+        self.assertEqual(json.dumps(a, sort_keys=True),
+                         json.dumps(b, sort_keys=True))
+
+    def test_criterion_line_leads_with_plan_verdict(self):
+        out = compiler.compile_state(SAMPLE_STATE)
+        f = out["options"]["up"]
+        line = compiler.criterion_line("up", f)
+        lead = "up: plan rank %d of %d, plan score %d, max-tile merge" % (
+            f["plan_rank"], f["plan_total"], f["plan_score"])
+        self.assertTrue(line.startswith(lead), line)
+
+    def test_planner_failure_degrades_to_no_plan_keys(self):
+        # a broken planner must NEVER crash the bot: simulate plan() raising
+        saved = compiler._PLANNER
+        try:
+            def boom(*a, **kw):
+                raise RuntimeError("planner under repair")
+            compiler._PLANNER = boom
+            compiler._PLAN_TRIED = True
+            out = compiler.compile_state(SAMPLE_STATE)
+            for d, f in out["options"].items():
+                self.assertNotIn("plan_score", f, d)
+            self.assertNotIn("planner_depth", out["board"])
+            # and the game-relevant facts are all still there
+            for k in D5_KEYS:
+                if k.startswith("plan_"):
+                    continue
+                self.assertIn(k, out["options"]["up"], k)
+        finally:
+            compiler._PLANNER = saved
 
 
 # ---------------- fallback policy (AC 2c, 2d) ----------------

@@ -33,6 +33,7 @@ import time
 import urllib.error
 import urllib.request
 
+import compiler
 from compiler import compile_state, criterion_line
 from policy import choose_fallback
 
@@ -99,7 +100,8 @@ def jev_choose(state_facts, dirs, client, instructions):
 
 
 def play_game(seed, policy_only=False, client=None, delay_ms=0,
-              max_moves=3000, base=BASE, jev_fn=None, instructions=None):
+              max_moves=3000, base=BASE, jev_fn=None, instructions=None,
+              planner_depth=None):
     """Play one seeded game. Returns the run-record dict (D7).
 
     jev_fn: optional (facts, dirs) -> (choice, confidence) override used by
@@ -109,7 +111,11 @@ def play_game(seed, policy_only=False, client=None, delay_ms=0,
     no greedy fallback: any legal answer is accepted, an unusable answer is
     re-asked once, then the first legal direction (up,left,down,right) is
     played as an audited `lastresort` stub.
+    planner_depth: expectimax depth for the compiled plan facts; None keeps
+    the compiler's current setting (--planner-depth; 0 disables them).
     """
+    if planner_depth is not None:
+        compiler.set_planner_depth(planner_depth)
     if instructions is None:
         instructions = load_instructions(None)
     state = api("/api/new", {"seed": seed} if seed is not None else {}, base=base)
@@ -249,7 +255,12 @@ def main(argv=None):
     ap.add_argument("--url", default=BASE, help=argparse.SUPPRESS)
     ap.add_argument("--instructions", default=DEFAULT_INSTRUCTIONS_PATH,
                     help="Jev prompt instructions file (default: %(default)s)")
+    ap.add_argument("--planner-depth", type=int, default=compiler.PLANNER_DEPTH,
+                    help="expectimax depth of the plan facts compiled into "
+                         "every turn's options (default %(default)s; "
+                         "0 = no planner facts at all)")
     args = ap.parse_args(argv)
+    compiler.set_planner_depth(args.planner_depth)
 
     seeds = parse_seeds(args)
     if args.seeds:
@@ -284,7 +295,8 @@ def main(argv=None):
     for i, seed in enumerate(seeds):
         rec = play_game(seed, policy_only=args.policy_only, client=client,
                         delay_ms=args.delay, max_moves=args.max_moves,
-                        base=args.url, instructions=instructions)
+                        base=args.url, instructions=instructions,
+                        planner_depth=args.planner_depth)
         rec["game_num"] = i + 1
         rec["win"] = rec["max_tile"] >= args.win_tile
         records.append(rec)

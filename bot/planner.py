@@ -16,19 +16,24 @@ DETERMINISM GUARANTEES
   outcomes in fixed DIST order. No RNG is consulted anywhere; plan() is a
   pure function of (grid, queue, valid_dirs, depth, node_budget, prune_delta,
   memo_on).
-- Float accumulation mirrors the JS oracle fold order for the snake/mono
-  parts (left folds, hardcoded V8 POWA constants) so direction values match
-  the JS reference bit-for-bit on equal paths.
+- Float accumulation mirrors the JS oracle fold order for every eval part
+  (left folds, hardcoded V8 POWA constants); direction values match the JS
+  reference bit-for-bit (validated by runs/_planner_validate.py against
+  game/_search_oracle.js).
 - Ties between direction values (within 1e-9, the JS oracle's epsilon) are
   broken with the policy.py greedy score among the tied directions; plan()
   biases the returned integer scores so plain argmax — and rank 1 of
   rank_options() — equals the JS oracle's tie-break pick. Remaining ties fall
   back to DIR_PRIORITY = (up, left, down, right).
 - Node budget: a hard cap on expectimax node visits (counted like the JS
-  oracle, memo hits included). On exhaustion the search stops expanding
-  children and evaluates the position where it stands (plain leaf eval), so
-  values may be shallower but every requested direction still gets a score;
+  oracle, memo hits included). Once tripped, every further node visit
+  evaluates the position where it stands (plain leaf eval), so values may be
+  shallower but every requested direction still gets a score;
   STATS["budget_exhausted"] reports whether the cap bound the search.
+- Internal caches (lane tables, slide/eval/expansion memos and the
+  transposition tables) are pure-value caches keyed on their inputs; only
+  fully-expanded (never budget-truncated) values are stored, so clearing
+  them can never change results, only speed.
 - plan() NEVER raises: malformed/weird states return an all-zero dict.
 
 Python 3.9+ stdlib only.
@@ -119,10 +124,6 @@ _POWA = (
 # VALW[c] = pow(VALS[c], sv=1) (mkW default sv=1)
 _VALW = tuple(float(_VALS[c]) if c < len(_VALS) else 0.0 for c in range(16))
 
-# VTAB[c] = [POWA[i] * VALW[c] for i in 0..15] — precomputed products so the
-# snake left fold matches the JS term-by-term exactly and stays fast.
-_VTAB = tuple(tuple(_POWA[i] * _VALW[c] for i in range(16)) for c in range(16))
-
 # weights: classic base W() with TW overrides (empty 90, cramp 240, isoJr
 # 25.2, jr 9.8). parts order: snake,mono,empty,cramp,chain,jr,isoJr,isoBig,
 # corner,sub,edgeBig,jrCorner
@@ -153,10 +154,6 @@ for _mc in range(16):
 
 # --------------------------------------------------------------------------
 # packed grid helpers. grid int: nibble i (row-major cell i) = tile CODE.
-# lane16[l] (l = 0..3): row l nibbles (0=leftmost..3=rightmost)
-# lane16[4+l]: col l nibbles (0=top..3=bottom). Lanes are always stored in
-# GRID order; a slide walks a lane in destination-first order by reversing
-# where needed.
 # --------------------------------------------------------------------------
 
 _REV16 = {}
@@ -172,10 +169,14 @@ def _rev16(l16):
 
 
 _LANEINFO = {}   # l16 -> (zeros, maxcode, maxcount within lane)
-_SLIDEL = {}     # l16 -> (out16, steps) | 0, grid-order lane slide
+_SLIDEL = {}     # l16 -> (out16, steps) | 0, lane slide toward index 0
 _UNPACK = {}     # grid int -> tuple of 16 codes
 _EVALC = {}      # grid int -> eval (pure fn; cross-move memo)
 _SLIDEM = {}     # (grid int, dir) -> (next, holes) | None
+_EXP = {}        # (grid<<5 | q0+1) -> sorted slide/chance children | None
+_TMEMO = {}      # prune_delta -> {packed (grid,depth,queue) -> value}
+_CACHE_CAP = 1 << 20
+_TMEMO_CAP = 1 << 21
 
 
 def _lane_info(l16):
@@ -197,9 +198,9 @@ def _lane_info(l16):
 
 
 def _slide_lane_forward(l16):
-    """Slide a grid-order lane that moves toward its index-3 end (left/down).
-    Returns (out16, steps) with steps = ((lane_i_from, lane_i_to, merge,
-    code)...), or 0 when nothing advances. Mirror of the engine lane loop."""
+    """Slide a lane whose tiles advance toward index 0 (destination edge).
+    Returns (out16, steps) with steps = ((i_from, i_to, merge, code)...),
+    or 0 when nothing advances. Mirror of the engine lane loop."""
     t = _SLIDEL.get(l16)
     if t is None:
         c = [l16 & 0xF, (l16 >> 4) & 0xF, (l16 >> 8) & 0xF, (l16 >> 12) & 0xF]
@@ -252,9 +253,25 @@ def _pack_grid(grid):
     return g
 
 
+def _col16(g, k):
+    """16-bit pattern of column k: nibble j = cell (j, k), j=0 top."""
+    return ((g >> (4 * k)) & 0xF) | \
+        (((g >> (16 + 4 * k)) & 0xF) << 4) | \
+        (((g >> (32 + 4 * k)) & 0xF) << 8) | \
+        (((g >> (48 + 4 * k)) & 0xF) << 12)
+
+
+def _put_col_bits(l16, k):
+    """Grid int carrying only column k = l16 (nibble j -> cell (j,k))."""
+    return ((l16 & 0xF) << (4 * k)) | \
+        ((((l16 >> 4) & 0xF) << (4 * k)) << 16) | \
+        ((((l16 >> 8) & 0xF) << (4 * k)) << 32) | \
+        ((((l16 >> 12) & 0xF) << (4 * k)) << 48)
+
+
 def _lane_ef(g, d, k):
     """Lane for search-dir d, lane k, in engine edge-first (destination-edge
-    first) order — identical to JS CELLS[d][k] tile sequence."""
+    first) order — identical to the JS CELLS[d][k] tile sequence."""
     if d == 0:                      # up: column k, top-first = grid order
         return _col16(g, k)
     if d == 1:                      # down: column k, bottom-first
@@ -268,8 +285,7 @@ def _slide(g, d):
     """Engine-faithful packed slide; d in NAMES order (up,down,left,right).
     Returns (next_packed, holes) with holes ascending on the spawn edge, or
     None when illegal (no advance, or no spawn hole in a moved lane).
-    Memoized on (g, d). Lanes are edge-first; the forward lane slide moves
-    tiles toward index 0 = the destination edge (engine loop order)."""
+    Memoized on (g, d)."""
     key = (g, d)
     if key in _SLIDEM:
         return _SLIDEM[key]
@@ -299,11 +315,13 @@ def _slide(g, d):
     if d == 0:      # spawn edge = bottom row; lane of cell 12+j is column j
         edge = (nxt >> 48) & 0xFFFF
         holes = tuple(12 + j for j in range(4)
-                      if ((edge >> (4 * j)) & 0xF) == 0 and (lane_mask & (1 << j)))
+                      if ((edge >> (4 * j)) & 0xF) == 0
+                      and (lane_mask & (1 << j)))
     elif d == 1:    # top row; lane of cell j is column j
         edge = nxt & 0xFFFF
         holes = tuple(j for j in range(4)
-                      if ((edge >> (4 * j)) & 0xF) == 0 and (lane_mask & (1 << j)))
+                      if ((edge >> (4 * j)) & 0xF) == 0
+                      and (lane_mask & (1 << j)))
     elif d == 2:    # right col (nibble 3 of each row); lane = row r
         holes = tuple(4 * r + 3 for r in range(4)
                       if (((nxt >> (16 * r + 12)) & 0xF) == 0
@@ -320,156 +338,146 @@ def _slide(g, d):
     return res
 
 
-def _col16(g, k):
-    """16-bit pattern of column k: nibble j = cell (j, k), j=0 top."""
-    return ((g >> (4 * k)) & 0xF) | \
-        (((g >> (16 + 4 * k)) & 0xF) << 4) | \
-        (((g >> (32 + 4 * k)) & 0xF) << 8) | \
-        (((g >> (48 + 4 * k)) & 0xF) << 12)
-
-
-def _put_col_bits(l16, k):
-    """Grid int carrying only column k = l16 (nibble j -> cell (j,k))."""
-    return ((l16 & 0xF) << (4 * k)) | \
-        ((((l16 >> 4) & 0xF) << (4 * k)) << 16) | \
-        ((((l16 >> 8) & 0xF) << (4 * k)) << 32) | \
-        ((((l16 >> 12) & 0xF) << (4 * k)) << 48)
-
-
 def _max_code(g):
     return max((_lane_info(g & 0xFFFF)[1], _lane_info((g >> 16) & 0xFFFF)[1],
-                _lane_info((g >> 32) & 0xFFFF)[1], _lane_info((g >> 48) & 0xFFFF)[1]))
+                _lane_info((g >> 32) & 0xFFFF)[1],
+                _lane_info((g >> 48) & 0xFFFF)[1]))
 
 
-# --------------------------------------------------------------------------
-# evaluation (port of JS evalGrid/evalFast with TW weights)
-# --------------------------------------------------------------------------
-
-def _eval_packed(g):
-    v = _EVALC.get(g)
-    if v is not None:
-        return v
-    i0 = _lane_info(g & 0xFFFF)
-    i1 = _lane_info((g >> 16) & 0xFFFF)
-    i2 = _lane_info((g >> 32) & 0xFFFF)
-    i3 = _lane_info((g >> 48) & 0xFFFF)
-    empties = i0[0] + i1[0] + i2[0] + i3[0]
-    mt = i0[1]
-    if i1[1] > mt:
-        mt = i1[1]
-    if i2[1] > mt:
-        mt = i2[1]
-    if i3[1] > mt:
-        mt = i3[1]
-    mt_cnt = 0
-    for it in (i0, i1, i2, i3):
-        if it[1] == mt:
-            mt_cnt += it[2]
-
+def _unpack16(g):
     c = _UNPACK.get(g)
     if c is None:
         c = tuple((g >> (4 * i)) & 0xF for i in range(16))
         _UNPACK[g] = c
+    return c
 
-    # snake (best of 8, left fold over precomputed terms) + mono on the winner
-    vt = _VTAB
-    best_s = -1e18
-    best_p = 0
+
+# --------------------------------------------------------------------------
+# evaluation (port of JS evalGrid/evalFast with TW weights)
+#
+# The hot evaluator is generated once at import time as one straight-line
+# function over 16 nibble locals: same structure and EXACT float accumulation
+# order as the JS evalGrid (left folds, precomputed per-term products), minus
+# the interpretive loop overhead. _EVALC memoizes it across moves (pure fn).
+# --------------------------------------------------------------------------
+
+_T = tuple(tuple(_POWA[i] * _VALW[c] for c in range(16)) for i in range(16))
+_CHA = tuple(float(a * a) if a >= 5 else float(a) for a in range(16))
+_IBI = (0.0, 0.0, 0.0, -1.0, -1.0, -2.0, -2.0, -2.0, -2.0,
+        -2.0, -2.0, -2.0, -2.0, -2.0, -2.0, -2.0)
+_ZT = (1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+
+def _build_eval_src():
+    L = []
+    A = L.append
+    args = ", ".join(("T%d=_T[%d]" % (i, i)) for i in range(16))
+    A("def _eval_raw(g, %s, CHA=_CHA, IBI=_IBI, ZT=_ZT, W=_WVEC):" % args)
+    A("    x0 = g & 0xF")
+    for i in range(1, 16):
+        A("    x%d = (g >> %d) & 0xF" % (i, 4 * i))
+    A("    em = ZT[x0] + ZT[x1] + ZT[x2] + ZT[x3] + ZT[x4] + ZT[x5]"
+      " + ZT[x6] + ZT[x7] + ZT[x8] + ZT[x9] + ZT[x10] + ZT[x11]"
+      " + ZT[x12] + ZT[x13] + ZT[x14] + ZT[x15]")
+    A("    mt = x0")
+    for i in range(1, 16):
+        A("    if x%d > mt:" % i)
+        A("        mt = x%d" % i)
+    A("    mc = 0")
+    for i in range(16):
+        A("    if x%d == mt:" % i)
+        A("        mc += 1")
+    # snake: exact left fold 0.0 + t0 + t1 + ... (empty cells contribute 0.0)
     for p in range(8):
         path = _SNAKES[p]
-        s = 0.0
-        i = 0
-        while i < 16:
-            s += vt[c[path[i]]][i]
-            i += 1
-        if s > best_s:
-            best_s = s
-            best_p = p
-    path = _SNAKES[best_p]
-    mono = 0.0
-    prev = c[path[0]]
-    for i in range(1, 16):
-        cc = c[path[i]]
-        dlt = prev - cc
-        mono += dlt if dlt >= 0 else 2.2 * dlt
-        prev = cc
-
-    # per-cell isolation / corners / stranded edge tiles
-    iso_big = 0
-    iso_jr = 0
-    jr_corner = 0
-    edge_big = 0
-    corner = 0
-    adj = _ADJ
+        terms = " + ".join(("T%d[x%d]" % (i, path[i])) for i in range(16))
+        A("    s%d = 0.0 + %s" % (p, terms))
+    A("    bs = s0")
+    A("    bp = 0")
+    for p in range(1, 8):
+        A("    if s%d > bs:" % p)
+        A("        bs = s%d" % p)
+        A("        bp = %d" % p)
+    # monotonicity along the winning snake path
+    for p in range(8):
+        path = _SNAKES[p]
+        A("    if bp == %d:" % p)
+        A("        mo = 0.0")
+        A("        pv = x%d" % path[0])
+        for i in range(1, 16):
+            A("        d_%d = pv - x%d" % (i, path[i]))
+            A("        mo += d_%d if d_%d >= 0 else 2.2 * d_%d"
+              % (i, i, i))
+            A("        pv = x%d" % path[i])
+    # per-cell parts in JS loop order (isolation/corners/stranded edge)
+    A("    ib = 0.0")
+    A("    ij = 0")
+    A("    jc = 0")
+    A("    eb = 0")
+    A("    co = 0")
     for i in range(16):
-        v = c[i]
-        if not v:
-            continue
-        if v >= 3:
-            eq = 0
-            for n in adj[i]:
-                if c[n] == v:
-                    eq = 1
-                    break
-            if not eq:
-                iso_big += -2 if v >= 5 else -1
-            if mt >= 3 and v == mt and _IS_CORNER[i]:
-                corner = 1
-        else:
-            need = 2 if v == 1 else 1
-            ok = 0
-            for n in adj[i]:
-                if c[n] == need:
-                    ok = 1
-                    break
-            if not ok:
-                iso_jr -= 1
-            if _IS_CORNER[i]:
-                jr_corner -= 1
-        if _EDGE_NONCORNER[i] and v >= 5:
-            edge_big -= (v - 3)
-
-    # pairs (right + down neighbours): chain / jr / sub-tier merge path
-    chain = 0.0
-    jr = 0.0
-    sub = 1.5 if (mt >= 3 and mt_cnt >= 2) else 0.0
+        nb = _ADJ[i]
+        A("    v = x%d" % i)
+        A("    if v:")
+        A("        if v >= 3:")
+        eq = " or ".join(("(x%d == v)" % n) for n in nb) or "False"
+        A("            if not (%s):" % eq)
+        A("                ib += IBI[v]")
+        if _IS_CORNER[i]:
+            A("            if mt >= 3 and v == mt:")
+            A("                co = 1")
+        A("        else:")
+        eq2 = " or ".join(("(x%d == 2)" % n) for n in nb) or "False"
+        eq1 = " or ".join(("(x%d == 1)" % n) for n in nb) or "False"
+        A("            if v == 1:")
+        A("                if not (%s):" % eq2)
+        A("                    ij -= 1")
+        A("            else:")
+        A("                if not (%s):" % eq1)
+        A("                    ij -= 1")
+        if _IS_CORNER[i]:
+            A("            jc -= 1")
+        if _EDGE_NONCORNER[i]:
+            A("        if v >= 5:")
+            A("            eb -= (v - 3)")
+    # pairs (right + down neighbours) in JS order: chain / jr / sub
+    A("    ch = 0.0")
+    A("    jr = 0.0")
+    A("    su = 1.5 if (mt >= 3 and mc >= 2) else 0.0")
     for i in range(16):
-        a = c[i]
-        if not a:
-            continue
-        if (i & 3) < 3:
-            b = c[i + 1]
-            if b:
-                if a == b:
-                    if a >= 3:
-                        chain += float(a * a) if a >= 5 else float(a)
-                        if a == mt:
-                            sub += 0.75
-                        elif mt >= 4 and a == mt - 1:
-                            sub += 1.0
-                elif (a == 1 and b == 2) or (a == 2 and b == 1):
-                    jr += 1.0
-        if (i >> 2) < 3:
-            b = c[i + 4]
-            if b:
-                if a == b:
-                    if a >= 3:
-                        chain += float(a * a) if a >= 5 else float(a)
-                        if a == mt:
-                            sub += 0.75
-                        elif mt >= 4 and a == mt - 1:
-                            sub += 1.0
-                elif (a == 1 and b == 2) or (a == 2 and b == 1):
-                    jr += 1.0
+        for j in (i + 1, i + 4):
+            if j >= 16 or (j == i + 1 and (i & 3) == 3):
+                continue
+            A("    a = x%d" % i)
+            A("    b = x%d" % j)
+            A("    if a and b:")
+            A("        if a == b:")
+            A("            if a >= 3:")
+            A("                ch += CHA[a]")
+            A("                if a == mt:")
+            A("                    su += 0.75")
+            A("                elif mt >= 4 and a == mt - 1:")
+            A("                    su += 1.0")
+            A("        elif (a == 1 and b == 2) or (a == 2 and b == 1):")
+            A("            jr += 1.0")
+    A("    return (W[0] * bs + W[1] * mo + W[2] * em"
+      " + W[3] * (-float(3 - em) if em < 3 else 0.0)"
+      " + W[4] * ch + W[5] * jr + W[6] * ij + W[7] * ib + W[8] * co"
+      " + W[9] * su + W[10] * eb + W[11] * jc)")
+    return "\n".join(L)
 
-    total = (_WVEC[0] * best_s + _WVEC[1] * mono + _WVEC[2] * empties
-             + _WVEC[3] * (-float(3 - empties) if empties < 3 else 0.0)
-             + _WVEC[4] * chain + _WVEC[5] * jr + _WVEC[6] * float(iso_jr)
-             + _WVEC[7] * float(iso_big) + _WVEC[8] * float(corner)
-             + _WVEC[9] * sub + _WVEC[10] * float(edge_big)
-             + _WVEC[11] * float(jr_corner))
-    _EVALC[g] = total
-    return total
+
+_NS = {"_T": _T, "_CHA": _CHA, "_IBI": _IBI, "_ZT": _ZT, "_WVEC": _WVEC}
+exec(compile(_build_eval_src(), "<planner-eval-codegen>", "exec"), _NS)
+_eval_raw = _NS["_eval_raw"]
+
+
+def _eval_packed(g):
+    v = _EVALC.get(g)
+    if v is None:
+        v = _eval_raw(g)
+        _EVALC[g] = v
+    return v
 
 
 def evaluate(grid, queue=None):
@@ -489,7 +497,7 @@ class _Ctx:
     def __init__(self, budget, memo_on, prune_delta):
         self.nodes = 0
         self.budget = budget
-        self.memo = {}
+        self.memo = {}                  # JS: fresh Map per move (searchMove)
         self.memo_on = memo_on
         self.prune_delta = prune_delta
         self.evals = 0
@@ -512,65 +520,134 @@ def _quick_val(next_packed, holes, q):
     return tot / wn if wn else -1e9
 
 
-def _best_c(g, depth, q, ctx):
-    """Max node: best over legal slides of the chance-node value (bestC)."""
-    ctx.nodes += 1
-    if depth <= 0 or ctx.nodes > ctx.budget:
-        if ctx.nodes > ctx.budget:
-            ctx.exhausted = 1
-        ctx.evals += 1
-        return _eval_packed(g)
-    key = None
-    if ctx.memo_on and depth >= 2:
-        key = (g, depth, q)
-        hit = ctx.memo.get(key)
-        if hit is not None:
-            ctx.memo_hits += 1
-            return hit
-    cand = []
-    sl = _slide
+def _expansion(g, q):
+    """All legal slides of g with their chance-node children + quickVal,
+    pre-sorted by quick value descending (JS cand.sort). Pure function of
+    (g, q[0]); memoized globally (slides/evals are pure)."""
+    q0 = q[0] if q else -1
+    key = (g << 5) | (q0 + 1)
+    hit = _EXP.get(key, 0)
+    if hit != 0:
+        return hit
+    out = []
     for d in range(4):
-        s = sl(g, d)
-        if s is not None:
-            cand.append((s[0], s[1], _quick_val(s[0], s[1], q)))
-    if not cand:
-        best = -_BIG + depth
-        if key is not None:
-            ctx.memo[key] = best
-        return best
-    if len(cand) > 2:
-        cand.sort(key=lambda t: -t[2])
-    pd = ctx.prune_delta
-    if pd > 0 and len(cand) > 2:
-        thr = cand[0][2] - pd * (cand[0][2] - cand[-1][2])
-    else:
-        thr = -1e18
-    best = -1e18
-    bc = _best_c
-    qn = q[1:] if q else q
-    q0 = q[0] if q else None
-    for i in range(len(cand)):
-        nxt, holes, qv_i = cand[i]
-        if i >= 2 and qv_i < thr:
+        s = _slide(g, d)
+        if s is None:
             continue
-        # chance node: AVG over every hole placement of queue[0] (or DIST)
-        if q0 is not None:
+        nxt, holes = s
+        if q0 >= 0:
             spawns = ((q0, 1.0),)
         else:
             spawns = _DIST[_max_code(nxt)]
+        kids = []
         tot = 0.0
         wn = 0.0
         for h in holes:
             bit = 4 * h
             clear = ~(0xF << bit)
             for sc, w in spawns:
-                tot += w * bc((nxt & clear) | (sc << bit), depth - 1, qn, ctx)
+                child = (nxt & clear) | (sc << bit)
+                kids.append((child, w))
+                tot += w * _eval_packed(child)
                 wn += w
-        v = tot / wn if wn else -_BIG
-        if v > best:
-            best = v
-    if key is not None:
-        ctx.memo[key] = best
+        out.append((tuple(kids), wn, tot / wn if wn else -1e9))
+    if not out:
+        hit = None
+    else:
+        if len(out) > 2:
+            out.sort(key=lambda t: -t[2])
+        hit = tuple(out)
+    _EXP[key] = hit
+    return hit
+
+
+def _best_c(g, depth, q, ctx):
+    """Max node: best over legal slides of the chance-node value (port of
+    bestC; chance aggregation inlined as the AVG over spawn children).
+
+    Memoization mirrors the JS exactly: a fresh dict per plan() call (JS
+    builds a new Map in searchMove), consulted only for depth >= 2, and
+    only AFTER the budget gate — so post-trip visits always leaf-evaluate,
+    never read back a truncated value, and node accounting stays identical
+    to the JS oracle (memo hits still count as one node)."""
+    ctx.nodes += 1
+    if depth <= 0 or ctx.nodes > ctx.budget:
+        if ctx.nodes > ctx.budget:
+            ctx.exhausted = 1
+        ctx.evals += 1
+        return _eval_packed(g)
+    if ctx.memo_on and depth >= 2:      # JS memo gate: depth >= 2 only
+        if len(q) <= 4:
+            qq = 0
+            for cc in q:
+                qq = (qq << 4) | cc
+            key = g | (depth << 80) | (qq << 84)
+        else:  # oversized queue tail: exact tuple key, no packing collision
+            key = (g, depth, q)
+        memo = ctx.memo
+        hit = memo.get(key)
+        if hit is not None:
+            ctx.memo_hits += 1
+            return hit
+    else:
+        memo = None
+        key = None
+    exp = _expansion(g, q)
+    if exp is None:
+        best = -_BIG + depth
+        if memo is not None and ctx.nodes <= ctx.budget:
+            memo[key] = best
+        return best
+    if len(exp) > 2:
+        pd = ctx.prune_delta
+        if pd > 0:
+            thr = exp[0][2] - pd * (exp[0][2] - exp[-1][2])
+        else:
+            thr = -1e18
+    else:
+        thr = -1e18
+    best = -1e18
+    i = 0
+    if depth == 1:
+        # children are leaves: inline bestC(child, 0) with the same node
+        # accounting (one visit each; post-trip visits leaf-evaluate anyway)
+        ep = _eval_packed
+        nodes = ctx.nodes
+        budget = ctx.budget
+        ev_cnt = ctx.evals
+        for kids, wn, qv_i in exp:
+            if i >= 2 and qv_i < thr:
+                i += 1
+                continue
+            tot = 0.0
+            for child, w in kids:
+                nodes += 1
+                if nodes > budget:
+                    ctx.exhausted = 1
+                tot += w * ep(child)
+                ev_cnt += 1
+            v = tot / wn if wn else -_BIG
+            if v > best:
+                best = v
+            i += 1
+        ctx.nodes = nodes
+        ctx.evals = ev_cnt
+    else:
+        bc = _best_c
+        qn = q[1:] if q else q
+        for kids, wn, qv_i in exp:
+            if i >= 2 and qv_i < thr:
+                i += 1
+                continue
+            tot = 0.0
+            for child, w in kids:
+                tot += w * bc(child, depth - 1, qn, ctx)
+            v = tot / wn if wn else -_BIG
+            if v > best:
+                best = v
+            i += 1
+    if memo is not None and ctx.nodes <= ctx.budget:
+        memo[key] = best
     return best
 
 
@@ -594,14 +671,8 @@ def _steps_of(g, d):
 
 def _greedy_score_for(gc, nxt, d):
     """Port of factsFor + greedyScore for one root slide (policy.py weights)."""
-    c = _UNPACK.get(gc)
-    if c is None:
-        c = tuple((gc >> (4 * i)) & 0xF for i in range(16))
-        _UNPACK[gc] = c
-    nc = _UNPACK.get(nxt)
-    if nc is None:
-        nc = tuple((nxt >> (4 * i)) & 0xF for i in range(16))
-        _UNPACK[nxt] = nc
+    c = _unpack16(gc)
+    nc = _unpack16(nxt)
     mt = _max_code(gc)
     nz = [c[i] for i in range(16) if c[i]]
     worst = min(nz) if nz else None
@@ -673,6 +744,19 @@ _PRUNED = -(10 ** 9)        # score for root-pruned dirs (below any real line)
 _ILLEGAL = -(10 ** 9) - 1   # score for dirs the compiler rejects
 
 
+def _cache_guard():
+    # pure caches: clearing never changes any value, only speed
+    if len(_EXP) > _CACHE_CAP:
+        _EXP.clear()
+    if len(_EVALC) > _CACHE_CAP:
+        _EVALC.clear()
+    if len(_SLIDEM) > _CACHE_CAP:
+        _SLIDEM.clear()
+    for _tb in list(_TMEMO.values()):
+        if len(_tb) > _TMEMO_CAP:
+            _tb.clear()
+
+
 def plan(grid, queue, valid_dirs, depth=3, node_budget=200000,
          prune_delta=0.25, memo_on=True):
     """Expectimax scores per direction (search-result facts for Jev).
@@ -681,7 +765,7 @@ def plan(grid, queue, valid_dirs, depth=3, node_budget=200000,
     queue       : upcoming spawn VALUES, front first (server 'next' queue)
     valid_dirs  : iterable of server-valid direction names
     depth       : expectimax plies of player moves (chance nodes between)
-    node_budget : hard cap on node visits; on exhaustion positions are leaf-
+    node_budget : hard cap on node visits; once tripped, positions are leaf-
                   evaluated where they stand (STATS['budget_exhausted'] = 1)
     prune_delta : quick-value pruning band; 0.25 = ex-t-d3 recipe,
                   0 = full width (ex-t-d5-np recipe)
@@ -698,6 +782,7 @@ def plan(grid, queue, valid_dirs, depth=3, node_budget=200000,
         out = {d: 0 for d in dirs}
         if not dirs:
             return out
+        _cache_guard()
         gc = _pack_grid(grid)
         if gc == 0:                     # empty board: nothing to plan
             return out
@@ -728,7 +813,7 @@ def plan(grid, queue, valid_dirs, depth=3, node_budget=200000,
             for (_fi, _ti, mg, val) in _steps_of(gc, c[0]):
                 if mg and val == mt + 1:
                     c[4] = True
-        cands.sort(key=lambda c: (0 if c[4] else 1, -c[3]))  # mergesMax, qv desc
+        cands.sort(key=lambda c: (0 if c[4] else 1, -c[3]))  # maxmerge, qv desc
 
         thr = -1e18
         if prune_delta > 0 and len(cands) > 2:
@@ -760,9 +845,12 @@ def plan(grid, queue, valid_dirs, depth=3, node_budget=200000,
             if v > best:
                 best = v
 
-        # int scores: value*100 floored, with groups kept strictly ordered so
-        # plain argmax always equals float argmax; search ties (within the
-        # JS 1e-9 epsilon) additionally biased to the greedyPick winner.
+        # int scores: value*100 floored, groups strictly ordered so plain
+        # argmax == float argmax; search ties (<= 1e-9 below best, the JS
+        # epsilon) additionally biased to the greedyPick winner.
+        for d, v in vals:
+            if v is None:
+                out[_NAMES[d]] = _PRUNED
         order = sorted(((v, d) for d, v in vals if v is not None),
                        key=lambda t: -t[0])
         groups = []

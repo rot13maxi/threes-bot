@@ -16,6 +16,7 @@ two consecutive unusable Jev answers; every run so far had 0 lastresorts).
 | 05 | iter-05-commit.txt | commit to the two directions pinning the max tile (board_text) | 2 | 96 | bench-iter-05-20261001-154435 |
 | 06 | iter-06-minimal.txt | minimal 5-fact strict ladder | 0 | 48 | bench-iter-06-20261001-155034 |
 | 08b | iter-08b-noladder.txt | search-distilled recipe as strict fact ladder (chain pairs rule 3, no planner) | 2 | 96 | bench-iter-08b-20261001-234154 |
+| 07 | iter-07-wiggle.txt | strict ladder incl. worst-case spawn wiggles survival rule | 2 (first 192 tile) | 192 | bench-iter-07-20261002-030923 |
 
 Reference points (same seeds, offline engines not using Jev): deterministic
 greedy policy 3/20; scripted pair-locked policies 0/20; JS expectimax

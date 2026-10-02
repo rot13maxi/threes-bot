@@ -6,11 +6,62 @@ named "grid" anywhere in the compiled dict).
 
 Python 3.9 stdlib only.
 """
+import time
 
 SIZE = 4
 DIRS = ("up", "left", "down", "right")
 
 _CORNERS = ((0, 0), (0, SIZE - 1), (SIZE - 1, 0), (SIZE - 1, SIZE - 1))
+
+# --- optional expectimax planner facts (planner.py) ----------------------
+# Each swipe additionally carries the planner's search verdict: plan_score
+# (expectimax value x100 at PLANNER_DEPTH), plan_rank (1 = best) and
+# plan_best, computed inside compile_state. The planner is a peer module
+# that may be under repair, so EVERYTHING here degrades gracefully: an
+# import failure, an exception inside plan(), or a wall-clock overrun
+# silently drops the plan facts instead of ever crashing the bot.
+
+try:  # bound once; may miss on circular first-import orders — compile_state
+    from planner import plan as _PLANNER  # retries the bind exactly once
+except Exception:  # missing or broken planner file: simply no search facts
+    _PLANNER = None
+_PLAN_TRIED = _PLANNER is not None
+
+PLANNER_DEPTH = 3                     # expectimax plies; 0 = disabled
+PLANNER_WALLCLOCK_S = 5.0             # a slower plan() call is dropped
+_PLAN_PRIORITY = ("up", "left", "down", "right")  # fixed rank tie-break
+_PLAN_MISSING = -(10 ** 9)            # score for dirs the planner dropped
+_PLAN_DISABLED = False                # flipped by set_planner_depth(0)
+
+
+def set_planner_depth(n):
+    """Set the expectimax depth the plan facts use in compile_state; 0 (or
+    a negative number) disables them entirely — no plan_* keys attached.
+    Returns the previous depth so callers can restore it."""
+    global PLANNER_DEPTH, _PLAN_DISABLED
+    prev = PLANNER_DEPTH
+    PLANNER_DEPTH = max(int(n), 0)
+    _PLAN_DISABLED = PLANNER_DEPTH <= 0
+    return prev
+
+
+def get_planner_depth():
+    """Current plan() expectimax depth used by compile_state (0 = disabled)."""
+    return PLANNER_DEPTH
+
+
+def _ensure_planner():
+    """Return planner.plan, or None when unavailable. If the module-import
+    bind above failed (e.g. planner.py imported first, so compiler was only
+    half-initialised), this retries exactly once from a settled state."""
+    global _PLANNER, _PLAN_TRIED
+    if _PLANNER is None and not _PLAN_TRIED:
+        _PLAN_TRIED = True
+        try:
+            from planner import plan as _PLANNER
+        except Exception:
+            _PLANNER = None
+    return _PLANNER
 
 
 def merge_result(a, b):
@@ -283,6 +334,58 @@ def _second_max_count(grid, next_grid):
     return sum(1 for row in next_grid for v in row if v == second)
 
 
+def _plan_dir_scores(state, options):
+    """Expectimax scores for the compiled options, or None when the plan
+    facts must be skipped (planner unavailable/disabled, nothing compiled,
+    malformed state, planner exception, or a call over PLANNER_WALLCLOCK_S).
+    The planner is a peer module that may be mid-repair: this NEVER raises.
+    """
+    if _PLAN_DISABLED or not options:
+        return None
+    plan = _ensure_planner()
+    if plan is None:
+        return None
+    if not isinstance(state, dict) or "grid" not in state:
+        return None
+    try:
+        t0 = time.perf_counter()
+        scores = plan(state["grid"], list(state.get("queue") or []),
+                      list(state["validMoves"]), depth=PLANNER_DEPTH)
+        if time.perf_counter() - t0 > PLANNER_WALLCLOCK_S:
+            return None                     # too slow: treat as failure
+        return scores if isinstance(scores, dict) and scores else None
+    except Exception:
+        return None
+
+
+def _attach_plan_facts(state, board, options):
+    """Add plan_score / plan_rank / plan_best to every compiled option and
+    planner_depth to the board facts; no-op when plan scores are None."""
+    scores = _plan_dir_scores(state, options)
+    if scores is None:
+        return
+    try:
+        dirs = list(options)
+        vals = {d: scores.get(d, _PLAN_MISSING) for d in dirs}
+        # non-numeric planner output (mid-repair) would blow up the sort:
+        # coerce, falling back to the missing-plan sentinel
+        vals = {d: (v if isinstance(v, (int, float))
+                    and not isinstance(v, bool) else _PLAN_MISSING)
+                for d, v in vals.items()}
+        ranked = sorted(dirs, key=lambda d: (-vals[d],
+                                              _PLAN_PRIORITY.index(d)
+                                              if d in _PLAN_PRIORITY else 99))
+        for rank, d in enumerate(ranked, start=1):
+            f = options[d]
+            f["plan_score"] = vals[d]
+            f["plan_rank"] = rank
+            f["plan_total"] = len(dirs)
+            f["plan_best"] = rank == 1
+        board["planner_depth"] = PLANNER_DEPTH
+    except Exception:
+        return
+
+
 def compile_state(state):
     """compile_state(state) -> facts dict (pure, deterministic, no `grid`).
 
@@ -442,14 +545,21 @@ def compile_state(state):
                 next_grid, d, next_spawn),
             "second_max_count": _second_max_count(grid, next_grid),
         }
+    _attach_plan_facts(state, board, options)
     return {"board": board, "options": options, "board_text": board_text}
 
 
 def criterion_line(dir, facts):
     """One-line factual summary for the Jev choice question (D10)."""
     parts = []
-    # Decisive facts FIRST: the fast model weighs the start of the line
-    # most, so the max-tile anchoring block leads.
+    # The expectimax verdict leads the line: Jev cannot do arithmetic, so
+    # the search result arrives as the plainest fact of all, first in line.
+    if facts.get("plan_rank") is not None:
+        parts.append("plan rank %d of %d, plan score %d" %
+                     (facts["plan_rank"], facts["plan_total"],
+                      facts["plan_score"]))
+    # Decisive facts next: the fast model weighs the start of the line
+    # most, so the max-tile anchoring block follows the plan verdict.
     parts.append("max-tile merge %s" % ("YES" if facts["max_tile_mergeable"] else "no"))
     pm = facts["pins_max_tile"]
     parts.append("pins max tile %s" %
