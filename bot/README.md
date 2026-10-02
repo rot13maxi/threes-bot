@@ -44,9 +44,11 @@ python3 jev_threes_bot.py --policy-only --delay 700 --seed 5
 
 Flags: `--policy-only` `--seed N` `--games N` `--seeds A-B` `--delay MS`
 `--win-tile T` (default 96) `--max-moves` (default 3000)
-`--instructions PATH` (Jev prompt file; default `prompts/iter-00-base.txt`)
+`--instructions PATH` (Jev prompt file; default `prompts/iter-09-rank1.txt`,
+the rank-1 prompt that pairs with the planner)
 `--planner-depth N` (expectimax depth behind the `plan rank/score` facts;
-0 disables; default 3). `bench.py` mirrors `--planner-depth`.
+0 disables; default 5 = winning recipe). `bench.py` mirrors both flags and
+adds `--procs K` (process shards; use it for the CPU-bound planner).
 
 Each run writes `runs/run-<ts>[-policy].jsonl` — one line per game:
 `{seed, score, max_tile, moves, game_over, aborted, decisions:
@@ -102,10 +104,15 @@ python3 planner_validate.py     # offline planner ladder: d3 12/20, --depth 5 13
   played as an audited `lastresort` stub (`jevOutcome` records why Jev was
   rejected). Live mode NEVER calls the greedy policy.
 - Prompts are versioned per benchmark iteration: `--instructions PATH`
-  selects the file (default `bot/prompts/iter-00-base.txt`) whose plain-text
-  block is sent to Jev as the choice instructions. `bot/bench.py` replays
-  seed sets in parallel against a chosen prompt file
-  (`python3 bench.py --instructions prompts/FILE --tag NAME`).
+  selects the file (default `bot/prompts/iter-09-rank1.txt`, the winning
+  rank-1 prompt; `prompts/iter-00-base.txt` is the pre-planner baseline)
+  whose plain-text block is sent to Jev as the choice instructions.
+  `prompts/ITERATIONS.md` is the hypothesis→win-rate log of the tuning
+  loop. `bot/bench.py` replays seed sets in parallel against a chosen
+  prompt file (`python3 bench.py --seeds 101-120 --tag NAME --procs 5`).
+  Final measured result: **13/20 (65%) games reach a 96 tile** with the
+  default config; the 7 losses are the oracle-hard seeds no search
+  strategy wins (`game/_oracle_run.log`).
 - `--policy-only` (unchanged): `policy.py` deterministic greedy policy only,
   zero Jev calls — `100*merges + 40*max_tile_merge + 15*empty_after
   − 10*edge_worst_penalty`, tie-break up, left, down, right.

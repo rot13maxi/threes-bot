@@ -86,13 +86,15 @@ python3 report.py runs/run-<timestamp>.jsonl    # scores, max tiles, decision-so
 
 Flags: `--policy-only` (deterministic greedy policy only, zero network), `--seed N` /
 `--seeds A-B`, `--delay MS` (per-move sleep for spectating), `--win-tile N`
-(default 96 = "win"), `--max-moves N`, `--instructions PATH` (Jev prompt file,
-default `bot/prompts/iter-00-base.txt`; prompts are versioned per bench iteration),
-`--planner-depth N` (expectimax depth behind the plan-rank facts, 0 disables).
+(default 96 = "win"), `--max-moves N`, `--instructions PATH` (Jev prompt file;
+default `bot/prompts/iter-09-rank1.txt` — the rank-1 instruction that pairs
+with the planner; prompts are versioned per bench iteration),
+`--planner-depth N` (expectimax depth behind the plan-rank facts; default 5
+= winning recipe, 0 disables — pair 0 with a non-rank prompt).
 
-Benchmark loop: `python3 bot/bench.py --instructions prompts/iter-09-rank1.txt
---seeds 101-120 --tag NAME --planner-depth 5` plays the fixed eval seed set in
-parallel (one server per worker) and prints win-rate vs the 96-tile target;
+Benchmark loop: `python3 bot/bench.py --seeds 101-120 --tag NAME --procs 5`
+plays the fixed eval seed set in parallel (process shards + one server per
+worker) and prints win-rate vs the 96-tile target;
 `bot/prompts/ITERATIONS.md` tracks each prompt iteration's win rate.
 
 The bot drives the game purely through the HTTP API (`/api/new` with its own seed,

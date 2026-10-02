@@ -12,7 +12,9 @@ unusable (illegal, missing, or the call raised) it is re-asked once; if the
 re-ask is also unusable, the first legal direction in up,left,down,right
 order is played as an audited `lastresort` stub (run-record source
 "lastresort"). The prompt instructions come from a versioned file
-(--instructions PATH, default bot/prompts/iter-00-base.txt).
+(--instructions PATH; the default bot/prompts/iter-09-rank1.txt pairs with
+the expectimax plan facts — it instructs Jev to play "plan rank 1 of N",
+the winning benchmark configuration, 13/20 games reaching a 96 tile).
 `--policy-only` skips Jev entirely (zero network to api.typesafe.ai) and
 plays the deterministic greedy policy from policy.py instead.
 
@@ -20,7 +22,7 @@ Examples:
   python3 jev_threes_bot.py --policy-only --games 20 --seeds 101-120
   python3 jev_threes_bot.py --policy-only --seed 42
   python3 jev_threes_bot.py --games 1 --seed 42
-  python3 jev_threes_bot.py --games 5 --instructions prompts/iter-01-aggressive.txt
+  python3 jev_threes_bot.py --games 5 --planner-depth 3   # faster, lower win rate
   python3 jev_threes_bot.py --policy-only --delay 700 --seed 5   # watch-AI mode
 
 Python 3.9 stdlib only.
@@ -42,7 +44,7 @@ WIN_TILE_DEFAULT = 96           # D9
 MAX_FAILS = 50                  # D7 spin guard
 LASTRESORT_PRIORITY = ("up", "left", "down", "right")
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_INSTRUCTIONS_PATH = os.path.join(HERE, "prompts", "iter-00-base.txt")
+DEFAULT_INSTRUCTIONS_PATH = os.path.join(HERE, "prompts", "iter-09-rank1.txt")
 
 
 def load_instructions(path=None):
@@ -114,7 +116,11 @@ def play_game(seed, policy_only=False, client=None, delay_ms=0,
     planner_depth: expectimax depth for the compiled plan facts; None keeps
     the compiler's current setting (--planner-depth; 0 disables them).
     """
-    if planner_depth is not None:
+    _saved = compiler.get_planner_depth()
+    if policy_only:
+        # greedy fallback ignores plan facts; keep --policy-only fast/offline
+        compiler.set_planner_depth(0)
+    elif planner_depth is not None:
         compiler.set_planner_depth(planner_depth)
     if instructions is None:
         instructions = load_instructions(None)
@@ -220,6 +226,8 @@ def play_game(seed, policy_only=False, client=None, delay_ms=0,
         else:
             fails = 0
         state = new_state
+    if policy_only:
+        compiler.set_planner_depth(_saved)
     return {
         "seed": state.get("seed", seed),
         "score": state.get("score", 0),
@@ -255,10 +263,11 @@ def main(argv=None):
     ap.add_argument("--url", default=BASE, help=argparse.SUPPRESS)
     ap.add_argument("--instructions", default=DEFAULT_INSTRUCTIONS_PATH,
                     help="Jev prompt instructions file (default: %(default)s)")
-    ap.add_argument("--planner-depth", type=int, default=compiler.PLANNER_DEPTH,
+    ap.add_argument("--planner-depth", type=int, default=5,
                     help="expectimax depth of the plan facts compiled into "
-                         "every turn's options (default %(default)s; "
-                         "0 = no planner facts at all)")
+                         "every turn's options; the winning benchmark config "
+                         "is 5 (~2 s/move). 3 = fast, 0 = no planner facts "
+                         "(pair 0 with a non-rank prompt via --instructions)")
     args = ap.parse_args(argv)
     compiler.set_planner_depth(args.planner_depth)
 

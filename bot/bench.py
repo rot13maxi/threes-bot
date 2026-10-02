@@ -213,8 +213,9 @@ def main(argv=None):
                     help="greedy fallback policy only; no Jev calls, no key needed")
     ap.add_argument("--delay", type=int, default=0, metavar="MS",
                     help="ms delay between moves (spectating sanity; default 0)")
-    ap.add_argument("--planner-depth", type=int, default=3,
-                    help="expectimax planner depth per move (0 disables; default 3)")
+    ap.add_argument("--planner-depth", type=int, default=5,
+                    help="expectimax planner depth per move (0 disables; "
+                         "default 5 = the winning benchmark recipe)")
     ap.add_argument("--procs", type=int, default=1,
                     help="shard the seed set across this many PROCESSES "
                          "(recommended with the CPU-bound planner; default "

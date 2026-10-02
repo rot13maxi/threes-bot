@@ -979,11 +979,9 @@ class JevOnlyLive(unittest.TestCase):
             self.assertNotIn("jevConfidence", d)
 
     def test_load_instructions_default_file(self):
-        text = load_instructions()          # default = iter-00-base
+        text = load_instructions()          # default = the winning prompt file
         self.assertEqual(text, load_instructions(DEFAULT_INSTRUCTIONS_PATH))
-        self.assertIn("Threes-like", text)
-        self.assertIn("pick the single best option", text)
-        self.assertNotIn("\n", text)         # single plain-text block
+        self.assertTrue(text.strip())
         with self.assertRaises(RuntimeError):
             load_instructions(os.path.join(HERE, "prompts", "no-such-iter.txt"))
 
