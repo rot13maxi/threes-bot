@@ -79,7 +79,7 @@ best score, best max_tile, mean score, and jev/fallback decision counts.
 
 ```
 python3 test_offline.py             # 68 cases; spawns its own server on :8399
-python3 runs/_planner_validate.py   # offline planner ladder: d3 12/20, --depth 5 13/20
+python3 planner_validate.py     # offline planner ladder: d3 12/20, --depth 5 13/20
 ```
 
 ## Design notes
