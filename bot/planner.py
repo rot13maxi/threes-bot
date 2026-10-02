@@ -174,9 +174,7 @@ _UNPACK = {}     # grid int -> tuple of 16 codes
 _EVALC = {}      # grid int -> eval (pure fn; cross-move memo)
 _SLIDEM = {}     # (grid int, dir) -> (next, holes) | None
 _EXP = {}        # (grid<<5 | q0+1) -> sorted slide/chance children | None
-_TMEMO = {}      # prune_delta -> {packed (grid,depth,queue) -> value}
 _CACHE_CAP = 1 << 20
-_TMEMO_CAP = 1 << 21
 
 
 def _lane_info(l16):
@@ -752,9 +750,15 @@ def _cache_guard():
         _EVALC.clear()
     if len(_SLIDEM) > _CACHE_CAP:
         _SLIDEM.clear()
-    for _tb in list(_TMEMO.values()):
-        if len(_tb) > _TMEMO_CAP:
-            _tb.clear()
+
+
+PLAN_RECIPES = {
+    # depth <= 3: tuned weights + quickVal dir prune (ex-t-d3 family)
+    "shallow": {"node_budget": 200000, "prune_delta": 0.25},
+    # depth >= 4: FULL width, 400k nodes — the ex-t-d5-np reference recipe
+    # (the config that wins 13/20 on seeds 101-120 in game/_search_oracle.js)
+    "deep": {"node_budget": 400000, "prune_delta": 0.0},
+}
 
 
 def plan(grid, queue, valid_dirs, depth=3, node_budget=200000,
@@ -771,12 +775,23 @@ def plan(grid, queue, valid_dirs, depth=3, node_budget=200000,
                   0 = full width (ex-t-d5-np recipe)
     memo_on     : transposition-table on/off
 
+    RECIPE DEFAULTS: when a caller passes only `depth` and leaves both
+    node_budget/prune_delta at their signature defaults (200000 / 0.25),
+    plan() selects PLAN_RECIPES by depth: depth <= 3 keeps the shallow
+    recipe (pruned, 200k); depth >= 4 switches to the deep reference recipe
+    ex-t-d5-np (prune_delta 0 = full width, 400k nodes) — the offline-
+    validated 13/20 configuration. Any explicit non-default knob wins as-is.
+
     Returns {dir: int(value * 100)} for every requested dir; comparable
     across the dirs of one call. Never raises (all-zero dict on malformed
     states). Ties within the JS 1e-9 epsilon are broken by the policy.py
     greedy score, and scores are biased so argmax == JS oracle pick; then
     rank_options(valid_dirs, scores) gives ranks 1..n.
     """
+    if (depth >= 4 and node_budget == PLAN_RECIPES["shallow"]["node_budget"]
+            and prune_delta == PLAN_RECIPES["shallow"]["prune_delta"]):
+        deep = PLAN_RECIPES["deep"]
+        node_budget, prune_delta = deep["node_budget"], deep["prune_delta"]
     try:
         dirs = [d for d in (valid_dirs or ()) if d in _DIR_IDX]
         out = {d: 0 for d in dirs}

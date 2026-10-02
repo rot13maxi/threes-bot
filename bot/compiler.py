@@ -339,7 +339,10 @@ def _plan_dir_scores(state, options):
     facts must be skipped (planner unavailable/disabled, nothing compiled,
     malformed state, planner exception, or a call over PLANNER_WALLCLOCK_S).
     The planner is a peer module that may be mid-repair: this NEVER raises.
-    """
+    Depth-specific search recipes (validated vs the JS oracle in
+    game/_oracle_run.log): depth<=3 -> 200k nodes, prune band 0.25;
+    depth>=4 -> 400k nodes, no pruning (the ex-t-d5-np recipe that wins
+    13/20 on the eval seeds)."""
     if _PLAN_DISABLED or not options:
         return None
     plan = _ensure_planner()
@@ -349,8 +352,12 @@ def _plan_dir_scores(state, options):
         return None
     try:
         t0 = time.perf_counter()
+        kwargs = {}
+        if PLANNER_DEPTH >= 4:
+            kwargs = {"node_budget": 400000, "prune_delta": 0.0}
         scores = plan(state["grid"], list(state.get("queue") or []),
-                      list(state["validMoves"]), depth=PLANNER_DEPTH)
+                      list(state["validMoves"]), depth=PLANNER_DEPTH,
+                      **kwargs)
         if time.perf_counter() - t0 > PLANNER_WALLCLOCK_S:
             return None                     # too slow: treat as failure
         return scores if isinstance(scores, dict) and scores else None

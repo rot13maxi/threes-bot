@@ -21,11 +21,12 @@ bot/    Python 3.9+ (stdlib only): the Jev bot (jev-only live play with
 │ (python)      │ /api/state    │ server.js :8321   │      browser client    │ API  │
 └──────┬───────┘ /api/move     └──────────────────┘  ◀── watches API moves ──┤      │
        │        ◀───────────────  /api/new /api/undo     (👀 Watch AI mode)  └──────┘
-       └── closed-set decision: enumerate legal moves in code → ask Jev for
-          ONE choice over compiled board facts (prompt from a versioned
-          prompts/ file) → accept any legal answer, whatever the confidence;
-          re-ask once if unusable, else play the first legal direction as an
-          audited `lastresort` stub. Jev plays every live move.
+       └── closed-set decision: enumerate legal moves in code → compile board
+          facts + per-move expectimax results (planner.py: plan rank/score of
+          each swipe, incl. the forced spawn and replies) → ask Jev for ONE
+          choice via a versioned prompts/ file → accept any legal answer,
+          whatever the confidence; re-ask once if unusable, else play the
+          first legal direction as an audited `lastresort` stub.
 ```
 
 Design invariants (why it's built this way):
@@ -71,7 +72,7 @@ node examples/ai-play.js --delay 700   # example greedy bot drives the game via 
 **4. Run the Jev bot** (from `bot/`):
 
 ```bash
-python3 test_offline.py                    # offline suite (28 tests, no network)
+python3 test_offline.py                    # offline suite (68 tests, no network)
 
 # spectate one game:  in the browser, open http://localhost:8321 and enable
 # 👀 Watch AI, then:
@@ -86,7 +87,13 @@ python3 report.py runs/run-<timestamp>.jsonl    # scores, max tiles, decision-so
 Flags: `--policy-only` (deterministic greedy policy only, zero network), `--seed N` /
 `--seeds A-B`, `--delay MS` (per-move sleep for spectating), `--win-tile N`
 (default 96 = "win"), `--max-moves N`, `--instructions PATH` (Jev prompt file,
-default `bot/prompts/iter-00-base.txt`; prompts are versioned per bench iteration).
+default `bot/prompts/iter-00-base.txt`; prompts are versioned per bench iteration),
+`--planner-depth N` (expectimax depth behind the plan-rank facts, 0 disables).
+
+Benchmark loop: `python3 bot/bench.py --instructions prompts/iter-09-rank1.txt
+--seeds 101-120 --tag NAME --planner-depth 5` plays the fixed eval seed set in
+parallel (one server per worker) and prints win-rate vs the 96-tile target;
+`bot/prompts/ITERATIONS.md` tracks each prompt iteration's win rate.
 
 The bot drives the game purely through the HTTP API (`/api/new` with its own seed,
 `/api/state`, `/api/move`), so the browser's Watch-AI view follows its moves live.
@@ -101,13 +108,15 @@ The bot drives the game purely through the HTTP API (`/api/new` with its own see
 | `game/examples/ai-play.js` | Reference external-AI loop over the same API |
 | `game/test/engine.test.js` | Engine test suite |
 | `bot/jev_threes_bot.py` | Bot loop: legal-move enumeration, jev-only decisions, lastresort stub, run log |
-| `bot/compiler.py` | Board → Jev-facing computed facts (never the raw grid) |
+| `bot/compiler.py` | Board → Jev-facing computed facts + plan ranks (never the raw grid) |
+| `bot/planner.py` | Deterministic expectimax (validated vs the JS oracle in `game/`) powering the per-option `plan rank/score` facts |
 | `bot/policy.py` | Deterministic greedy policy (`--policy-only` mode only) |
-| `bot/prompts/` | Versioned Jev prompt instructions (baseline: `iter-00-base.txt`) |
-| `bot/bench.py` | Parallel benchmark: seed set × prompt file → per-tag summary |
+| `bot/prompts/` | Versioned Jev prompt instructions (`iter-00-base.txt` … `iter-09-rank1.txt`, `ITERATIONS.md` log) |
+| `bot/bench.py` | Parallel benchmark: seed set × prompt file × planner depth → per-tag summary |
+| `bot/analyze.py` | Replay a run log against a live server: Jev-vs-greedy diffs with the facts each turn showed |
 | `bot/jev_client.py` | Minimal stdlib client for `POST /v1/systemone` (+429 backoff) |
 | `bot/report.py` | Summarize a run `.jsonl` (scores, decisions, costs) |
-| `bot/test_offline.py` | Offline suite: compiler/policy/jev-only-live/determinism, no network |
+| `bot/test_offline.py` | Offline suite: compiler/policy/jev-only-live/planner facts, no network |
 
 ## API notes
 

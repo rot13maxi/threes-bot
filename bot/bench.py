@@ -124,7 +124,8 @@ class Worker:
             rec = play_game(seed, policy_only=self.args.policy_only,
                             client=self.client, delay_ms=self.args.delay,
                             max_moves=self.args.max_moves, base=self.base,
-                            instructions=self.instructions)
+                            instructions=self.instructions,
+                            planner_depth=self.args.planner_depth)
         except Exception as e:
             return self.error_record(seed, e)
         rec["worker"] = self.index
@@ -138,6 +139,30 @@ def chunk_round_robin(seeds, nworkers):
     for i, seed in enumerate(seeds):
         buckets[i % nworkers].append(seed)
     return buckets
+
+
+def shard_worker(shard_index, nshards, workers_per, args_dict, instructions,
+                queue):
+    """Runs in its OWN process (the expectimax planner is CPU-bound and the
+    GIL serializes threads otherwise). Plays its seed slice sequentially on
+    workers_per local servers; returns (records, costs) via the queue."""
+    import argparse
+    args = argparse.Namespace(**args_dict)
+    my_seeds = [s for i, s in enumerate(args.seeds_list) if i % nshards == shard_index]
+    base_index = shard_index * workers_per
+    workers = [Worker(base_index + i, args, instructions)
+               for i in range(workers_per)]
+    buckets = chunk_round_robin(my_seeds, workers_per)
+    import threading as _th
+    threads = [_th.Thread(target=w.run, args=(bucket,))
+               for w, bucket in zip(workers, buckets) if bucket]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    records = [r for w in workers for r in w.records]
+    costs = [w.client.cost_usd() for w in workers if w.client is not None]
+    queue.put((records, costs))
 
 
 def summarize(records, args, seeds, instructions_path, costs):
@@ -186,6 +211,12 @@ def main(argv=None):
                     help="greedy fallback policy only; no Jev calls, no key needed")
     ap.add_argument("--delay", type=int, default=0, metavar="MS",
                     help="ms delay between moves (spectating sanity; default 0)")
+    ap.add_argument("--planner-depth", type=int, default=3,
+                    help="expectimax planner depth per move (0 disables; default 3)")
+    ap.add_argument("--procs", type=int, default=1,
+                    help="shard the seed set across this many PROCESSES "
+                         "(recommended with the CPU-bound planner; default "
+                         "1 = threads only)")
     args = ap.parse_args(argv)
 
     if args.seeds:
@@ -205,22 +236,39 @@ def main(argv=None):
     os.makedirs(RUNS_DIR, exist_ok=True)
     jsonl_path = os.path.join(RUNS_DIR, "bench-%s-%s.jsonl" % (args.tag, ts))
 
-    workers = [Worker(i, args, instructions) for i in range(workers_n)]
-    buckets = chunk_round_robin(seeds, workers_n)
-    threads = []
-    for w, bucket in zip(workers, buckets):
-        t = threading.Thread(target=w.run, args=(bucket,), name="bench-w%d" % w.index)
-        threads.append(t)
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    records = []
-    for w in workers:
-        records.extend(w.records)
+    if args.procs > 1:
+        import multiprocessing as mp
+        nprocs = max(1, min(args.procs, len(seeds)))
+        workers_per = max(1, workers_n // nprocs)
+        args_dict = dict(vars(args))
+        args_dict["seeds_list"] = seeds
+        ctx = mp.get_context("spawn")
+        queue = ctx.Queue()
+        procs = [ctx.Process(target=shard_worker,
+                             args=(i, nprocs, workers_per, args_dict,
+                                   instructions, queue))
+                 for i in range(nprocs)]
+        for p in procs:
+            p.start()
+        collected = [queue.get() for _ in procs]
+        for p in procs:
+            p.join()
+        records = [r for recs, _c in collected for r in recs]
+        costs = [c for _r, cs in collected for c in cs]
+    else:
+        workers = [Worker(i, args, instructions) for i in range(workers_n)]
+        buckets = chunk_round_robin(seeds, workers_n)
+        threads = []
+        for w, bucket in zip(workers, buckets):
+            t = threading.Thread(target=w.run, args=(bucket,), name="bench-w%d" % w.index)
+            threads.append(t)
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        records = [r for w in workers for r in w.records]
+        costs = [w.client.cost_usd() for w in workers if w.client is not None]
     records.sort(key=lambda r: r.get("seed", 0))
-    costs = [w.client.cost_usd() for w in workers if w.client is not None]
 
     with open(jsonl_path, "a") as f:
         for rec in records:

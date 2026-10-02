@@ -33,10 +33,10 @@ python3 jev_threes_bot.py --policy-only --seed 42
 python3 jev_threes_bot.py --games 1 --seed 42
 
 # live game with a versioned prompt (bench iterations add prompts/iter-NN-*.txt)
-python3 jev_threes_bot.py --games 5 --seeds 21-25 --instructions prompts/iter-01-aggressive.txt
+python3 jev_threes_bot.py --games 5 --seeds 21-25 --instructions prompts/iter-09-rank1.txt
 
 # parallel benchmark across seeds (own servers/ports; see bench.py --help)
-python3 bench.py --instructions prompts/iter-00-base.txt --tag iter-00 --seeds 101-120
+python3 bench.py --instructions prompts/iter-09-rank1.txt --tag iter-09 --seeds 101-120 --planner-depth 5
 
 # watch-AI mode: open http://localhost:8321, click "👀 Watch AI", then
 python3 jev_threes_bot.py --policy-only --delay 700 --seed 5
@@ -44,7 +44,9 @@ python3 jev_threes_bot.py --policy-only --delay 700 --seed 5
 
 Flags: `--policy-only` `--seed N` `--games N` `--seeds A-B` `--delay MS`
 `--win-tile T` (default 96) `--max-moves` (default 3000)
-`--instructions PATH` (Jev prompt file; default `prompts/iter-00-base.txt`).
+`--instructions PATH` (Jev prompt file; default `prompts/iter-00-base.txt`)
+`--planner-depth N` (expectimax depth behind the `plan rank/score` facts;
+0 disables; default 3). `bench.py` mirrors `--planner-depth`.
 
 Each run writes `runs/run-<ts>[-policy].jsonl` — one line per game:
 `{seed, score, max_tile, moves, game_over, aborted, decisions:
@@ -76,13 +78,23 @@ best score, best max_tile, mean score, and jev/fallback decision counts.
 ## Tests
 
 ```
-python3 test_offline.py     # 28 cases; spawns its own server on :8399
+python3 test_offline.py             # 68 cases; spawns its own server on :8399
+python3 runs/_planner_validate.py   # offline planner ladder: d3 12/20, --depth 5 13/20
 ```
 
 ## Design notes
 
 - `compiler.py` precomputes every fact (Jev cannot count); the raw grid is
-  never sent to Jev.
+  never sent to Jev. The state payload additionally carries `board_text`:
+  a plain ASCII view of the board for spatial grounding.
+- `planner.py` is a deterministic expectimax (port of the JS oracle in
+  `../game/_oracle_run.log`; validated move-for-move against it). Each legal
+  option gets `plan_score`, `plan_rank`, `plan_best` from a search over the
+  swipe + forced spawn + replies; `criterion_line` LEADS with
+  `plan rank R of N, plan score S`, and the winning prompt
+  (`prompts/iter-09-rank1.txt`) simply tells Jev to play rank 1. Depth>=4
+  uses the 400k-node/no-prune recipe automatically. Planner failures never
+  crash a game: plan facts are dropped and the other facts still decide.
 - Live mode = Jev plays every move: any choice in `validMoves` is accepted
   regardless of the reported confidence value/type. An unusable answer
   (illegal, missing, or the call raised) triggers ONE re-ask; when that is
