@@ -109,9 +109,11 @@ The bot drives the game purely through the HTTP API (`/api/new` with its own see
 | `game/public/` | Mobile-friendly browser client (Watch-AI spectator mode) |
 | `game/examples/ai-play.js` | Reference external-AI loop over the same API |
 | `game/test/engine.test.js` | Engine test suite |
+| `game/_search_oracle.js` | JS expectimax/rollout ceiling study (source of the planner recipe; see `game/_oracle_run.log`) |
 | `bot/jev_threes_bot.py` | Bot loop: legal-move enumeration, jev-only decisions, lastresort stub, run log |
 | `bot/compiler.py` | Board → Jev-facing computed facts + plan ranks (never the raw grid) |
-| `bot/planner.py` | Deterministic expectimax (validated vs the JS oracle in `game/`) powering the per-option `plan rank/score` facts |
+| `bot/planner.py` | Deterministic expectimax (port of the JS oracle, cross-checked move-for-move) powering the per-option `plan rank/score` facts |
+| `bot/planner_validate.py` | Offline planner validation: seeds 101-120 ladder (d3 12/20, d5 13/20) + JS cross-check |
 | `bot/policy.py` | Deterministic greedy policy (`--policy-only` mode only) |
 | `bot/prompts/` | Versioned Jev prompt instructions (`iter-00-base.txt` … `iter-09-rank1.txt`, `ITERATIONS.md` log) |
 | `bot/bench.py` | Parallel benchmark: seed set × prompt file × planner depth → per-tag summary |
