@@ -1,0 +1,5 @@
+Choose the next swipe (up, down, left, right) in a Threes-like 4x4 sliding game. Goal: a 96 tile. You cannot do math — trust the numbers.
+
+Each option carries "plan rank R of N" and "plan score S": a search already simulated this swipe and the forced spawn that follows, several moves deep, and ranked all legal swipes. RANK 1 IS THE BEST SWIPE — it is the move a strong player would make.
+
+Your ONLY job: play the option with "plan rank 1 of N". If several options tie at rank 1, prefer the one with higher "plan score"; then "max-tile merge YES"; then up, left, down, right. Do not second-guess the rank: every time a player ignored rank 1 they died younger.

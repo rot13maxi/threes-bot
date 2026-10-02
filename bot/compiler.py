@@ -438,6 +438,9 @@ def compile_state(state):
             "pins_max_tile": pins_max,
             "anchor_kept": anchor_kept,
             "max_tile_corner_after": corner_after,
+            "min_wiggles_after_spawn": _min_wiggles_after_spawn(
+                next_grid, d, next_spawn),
+            "second_max_count": _second_max_count(grid, next_grid),
         }
     return {"board": board, "options": options, "board_text": board_text}
 
@@ -479,10 +482,15 @@ def criterion_line(dir, facts):
     parts.append("big tile stranded on spawn edge %s" %
                  ("n/a" if sb is None else ("YES" if sb else "no")))
     parts.append("next spawn %s" % facts["next_spawn_value"])
+    mw = facts["min_wiggles_after_spawn"]
+    parts.append("worst-case spawn wiggles %s" %
+                 ("n/a" if mw is None else mw))
     parts.append("%d mergeable equal pairs left after" % facts["chain_pairs_after"])
     sp = facts["second_max_pair_exists"]
-    parts.append("second-biggest tile pair on board %s" %
-                 ("n/a" if sp is None else ("YES" if sp else "no")))
+    smc = facts["second_max_count"]
+    parts.append("second-biggest tile %s on board %s" %
+                 ("n/a" if smc is None else "x%d" % smc,
+                  "n/a" if sp is None else ("YES" if sp else "no")))
     ib = facts["isolated_big_after"]
     parts.append("%s isolated big tiles left after" % ("n/a" if ib is None else ib))
     parts.append("%d tiles move" % facts["moves"])

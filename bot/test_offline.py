@@ -49,7 +49,9 @@ D5_KEYS = ("moves", "merges", "merge_counts_by_value", "max_tile_mergeable",
            "spawn_edge_empties", "spawn_edge_has_big",
            "isolated_big_after", "second_max_pair_exists",
            # D6 additions (per-option max-tile anchoring)
-           "pins_max_tile", "anchor_kept", "max_tile_corner_after")
+           "pins_max_tile", "anchor_kept", "max_tile_corner_after",
+           # D11 additions (worst-case survival + runner-up supply count)
+           "min_wiggles_after_spawn", "second_max_count")
 D5_BOARD_KEYS = ("max_tile", "max_tile_pos", "max_tile_pin_dirs",
                  "score", "empty_count", "corner_values",
                  "worst_tile_count", "worst_tile_value")
@@ -284,19 +286,22 @@ class CompilerFacts(unittest.TestCase):
         self.assertIn("spawn-edge empties 4", line)
         self.assertIn("big tile stranded on spawn edge no", line)
         self.assertIn("isolated big tiles left after", line)
-        self.assertIn("second-biggest tile pair on board no", line)
+        self.assertIn("second-biggest tile x1 on board no", line)
+        self.assertIn("worst-case spawn wiggles 4", line)
         self.assertNotIn("grid", line)
 
     def test_c3_criterion_line_renders_none_as_na(self):
         f = dict(compiler.compile_state(SAMPLE_STATE)["options"]["up"])
         for k in ("spawn_edge_empties", "spawn_edge_has_big",
-                  "isolated_big_after", "second_max_pair_exists"):
+                  "isolated_big_after", "second_max_pair_exists",
+                  "min_wiggles_after_spawn", "second_max_count"):
             f[k] = None
         line = compiler.criterion_line("up", f)
         self.assertIn("spawn-edge empties n/a", line)
         self.assertIn("big tile stranded on spawn edge n/a", line)
         self.assertIn("n/a isolated big tiles left after", line)
-        self.assertIn("second-biggest tile pair on board n/a", line)
+        self.assertIn("second-biggest tile n/a on board n/a", line)
+        self.assertIn("worst-case spawn wiggles n/a", line)
 
     # --- D6: per-option max-tile pin / anchor facts ----------------------
 
@@ -414,6 +419,187 @@ class CompilerFacts(unittest.TestCase):
         self.assertIn("pins max tile n/a", line)
         self.assertIn("anchor kept n/a", line)
         self.assertIn("big tile in corner after n/a", line)
+
+    # --- D11: worst-case spawn survival + runner-up supply count ---------
+
+    def test_d11_min_wiggles_death_trap_handverified(self):
+        # Swipe UP on this board slides: row3 col2's 3 rises into r2c2 (the
+        # 0 there), everything else is blocked -> post-slide
+        #   [24, 3, 2, 0]
+        #   [ 1,96,48, 0]
+        #   [ 3, 6, 3, 0]
+        #   [12, 3, 0, 0]
+        # so the spawn (queue[0] = 1) may land at (3,2) or (3,3).
+        # WORST case (3,2): remaining empty is only (3,3). Hand-check of
+        # _advance_possible on [[24,3,2,0],[1,96,48,0],[3,6,3,0],[12,3,1,0]]:
+        #   left : row3 [12,3,1,_]: 3->12, 1->3, none merge (1+2 only), 0 at
+        #          the far end blocks nothing but no tile slides left; every
+        #          other row is a solid blocked lane; cols keep blocked runs.
+        #   up   : col2 [2,48,3,1]: 48->2 no, 3->48 no, 1->3 no (1+2=3 only);
+        #          col3 all empty; col0/col1 runs [24,1,3,12] & [3,96,6,3]
+        #          have no mergeable pair nor empty gap -> no.
+        #   down : col2: 3->1? no (3+1 not a merge); col0: 3->12, 12->3? no
+        #          equal-double nor 1+2; col1: 6->3? no -> no.
+        #   right: tile 1 at (3,2) slides into the empty (3,3) -> YES.
+        # Exactly ONE wiggle. The (3,3) placement leaves 4; min = 1.
+        out = compiler.compile_state(self._state(
+            [[24, 3, 2, 0], [1, 96, 48, 0], [3, 6, 0, 0], [12, 3, 3, 0]],
+            ["up", "left", "down", "right"], queue=(1, 2, 3)))
+        self.assertEqual(out["options"]["up"]["min_wiggles_after_spawn"], 1)
+
+    def test_d11_min_wiggles_total_lock_is_zero(self):
+        # Swipe UP: only col3 moves (its bottom 24 steps up one); post-slide
+        #   [48, 3,12, 6]
+        #   [24, 6,24,12]
+        #   [12,24, 6,24]
+        #   [24,48,12, 0]
+        # leaves the SINGLE spawn cell (3,3). Placing queue[0]=1 there makes
+        # a fully packed board; hand-check: no adjacent equal 3*2^k pair and
+        # no (1,2) pair exist in any row ([48,3,12,6],[24,6,24,12],
+        # [12,24,6,24],[24,48,12,1]) or column ([48,24,12,24],[3,6,24,48],
+        # [12,24,6,12],[6,12,24,1]) -> zero lanes can advance: the game is
+        # over the instant the tile lands. This is the true death trap.
+        out = compiler.compile_state(self._state(
+            [[48, 3, 12, 0], [24, 6, 24, 6], [12, 24, 6, 12], [24, 48, 12, 24]],
+            ["up", "right"], queue=(1, 2, 3)))
+        self.assertEqual(out["options"]["up"]["min_wiggles_after_spawn"], 0)
+        self.assertTrue(compiler.simulate_slide(
+            [[48, 3, 12, 0], [24, 6, 24, 6], [12, 24, 6, 12], [24, 48, 12, 24]],
+            "up"), "server-valid move: spawn cell exists")
+
+    def test_d11_min_wiggles_safe_board_wide_open(self):
+        # Swipe UP: the 24 pair slides up one, spawn edge (bottom row) is
+        # entirely empty -> 4 placements. Any single 1 dropped on the bottom
+        # row of an otherwise [24,24]-plus-13-empties board still lets all
+        # four directions advance (24 pair merges left/right; empties give
+        # the vertical slides) -> min = 4 >= 3.
+        out = compiler.compile_state(self._state(
+            [[0, 0, 0, 0], [0, 0, 0, 0], [24, 24, 0, 0], [0, 0, 0, 0]],
+            ["up", "left", "down", "right"], queue=(1, 2, 3)))
+        self.assertGreaterEqual(out["options"]["up"]["min_wiggles_after_spawn"], 3)
+        self.assertEqual(out["options"]["up"]["min_wiggles_after_spawn"], 4)
+
+    def test_d11_min_wiggles_placement_sensitive(self):
+        # Checkerboard with NO mergeable adjacency (no equal pairs, no 1+2
+        # pair): swiping UP only frees cells the slide vacated. Post-slide:
+        #   [48, 1,24, 2]
+        #   [ 1, 6, 2,48]
+        #   [12, 2, 3, 1]
+        #   [ 0,24, 0, 6]
+        # Candidates: (3,0) and (3,2). Placing the 1 at (3,2) SURROUNDS it
+        # (row3 [_,24,1,6], col2 [24,2,3,1] all unmergeable against it);
+        # the only surviving advances come from the leftover empty (3,0):
+        #   left  : 24 slides into (3,0)          -> YES
+        #   down  : (2,0)=12 slides into (3,0)    -> YES
+        #   right : 1 blocked by 6, 24 blocked by 1, rows above solid   -> no
+        #   up    : col2 stack 3->2? no, 2->24? no; col0 bottom empty    -> no
+        # -> 2 wiggles. The (3,0) placement keeps left+right+down = 3.
+        # min == the surrounded placement's count.
+        out = compiler.compile_state(self._state(
+            [[0, 1, 0, 2], [48, 6, 24, 48], [1, 2, 2, 1], [12, 24, 3, 6]],
+            ["up", "left", "right"], queue=(1, 2, 3)))
+        self.assertEqual(out["options"]["up"]["min_wiggles_after_spawn"], 2)
+
+    def test_d11_second_max_count_exact(self):
+        # Swipe DOWN drops each test row intact onto row3 (pre-spawn).
+        # {48,24,24,3}: second distinct value 24 appears twice -> merge-ready
+        out = compiler.compile_state(self._state(
+            [[0, 0, 0, 0], [0, 0, 0, 0], [48, 24, 24, 3], [0, 0, 0, 0]],
+            ["up", "left", "down", "right"]))
+        self.assertEqual(out["options"]["down"]["second_max_count"], 2)
+        # {48,24,3,1}: lone 24 waiting for its partner
+        out = compiler.compile_state(self._state(
+            [[0, 0, 0, 0], [0, 0, 0, 0], [48, 24, 3, 1], [0, 0, 0, 0]],
+            ["up", "down"]))
+        self.assertEqual(out["options"]["down"]["second_max_count"], 1)
+        # single distinct value 24: its own post-slide count (3 copies)
+        out = compiler.compile_state(self._state(
+            [[0, 0, 0, 0], [0, 0, 0, 0], [24, 24, 24, 0], [0, 0, 0, 0]],
+            ["up", "left", "down", "right"]))
+        self.assertEqual(out["options"]["down"]["second_max_count"], 3)
+
+    def test_d11_advance_possible_mirrors_engine(self):
+        # Fully packed unmergeable board: no direction can advance anything
+        # (hand-verified against the lane geometry above)
+        lock = [[48, 3, 12, 6], [24, 6, 24, 12], [12, 24, 6, 24], [24, 48, 12, 1]]
+        for d in ("up", "left", "down", "right"):
+            self.assertFalse(compiler._advance_possible(lock, d), d)
+        # the surrounded SENS placement (1 wedged at (3,2) with the leftover
+        # empty at (3,0)): only left (24 -> (3,0)) and down ((2,0)=12 ->
+        # (3,0)) can advance; right is blocked (1 vs 6, 24 vs 1) and every
+        # column stack is unmergeable -> up no, right no
+        wedged = [[48, 1, 24, 2], [1, 6, 2, 48], [12, 2, 3, 1], [0, 24, 1, 6]]
+        self.assertTrue(compiler._advance_possible(wedged, "left"))
+        self.assertTrue(compiler._advance_possible(wedged, "down"))
+        self.assertFalse(compiler._advance_possible(wedged, "up"))
+        self.assertFalse(compiler._advance_possible(wedged, "right"))
+        # fully packed row0 [1,2,48,24]: the 1|2 pair can merge leftward AND
+        # rightward; no other lane holds a slide or a merge
+        packed = [[1, 2, 48, 24], [3, 6, 12, 48], [6, 12, 24, 3], [12, 24, 3, 6]]
+        self.assertTrue(compiler._advance_possible(packed, "left"))
+        self.assertTrue(compiler._advance_possible(packed, "right"))
+        self.assertFalse(compiler._advance_possible(packed, "up"))
+        self.assertFalse(compiler._advance_possible(packed, "down"))
+
+    def test_d11_self_consistency_advance_vs_slide(self):
+        # Cross-check the survival fact against an INDEPENDENT reference
+        # written from the engine's lane rule ("some tile can advance" <=>
+        # some tile has an empty forward neighbour or a mergeable pair),
+        # plus the slide gate: a dir is compile-able (in validMoves with a
+        # fact) iff simulate_slide says legal. A legal move must always
+        # expose an int 0..4: a server-legal swipe has at least one spawn
+        # placement, and 0 is allowed — a random spawn CAN lock the board
+        # instantly (see the total-lock test above).
+        def ref_advance(g, d):
+            step = {"up": (-1, 0), "down": (1, 0), "left": (0, -1),
+                    "right": (0, 1)}[d]
+            for r in range(4):
+                for c in range(4):
+                    v = g[r][c]
+                    if v == 0:
+                        continue
+                    nr, nc = r + step[0], c + step[1]
+                    if not (0 <= nr < 4 and 0 <= nc < 4):
+                        continue
+                    t = g[nr][nc]
+                    if t == 0 or compiler.merge_result(t, v) is not None:
+                        return True
+            return False
+
+        boards = [
+            [[0, 1, 2, 0], [0, 3, 3, 6], [1, 0, 12, 24], [2, 0, 0, 48]],
+            [[24, 3, 2, 0], [1, 96, 48, 0], [3, 6, 0, 0], [12, 3, 3, 0]],
+            [[48, 3, 12, 0], [24, 6, 24, 6], [12, 24, 6, 12], [24, 48, 12, 24]],
+            [[0, 1, 0, 2], [48, 6, 24, 48], [1, 2, 2, 1], [12, 24, 3, 6]],
+            [[3, 6, 24, 0], [6, 2, 0, 0], [3, 1, 0, 0], [24, 24, 0, 0]],
+            [[96, 3, 12, 6], [48, 6, 24, 12], [24, 48, 12, 24], [12, 96, 48, 0]],
+        ]
+        for grid in boards:
+            legal_dirs = [d for d in ("up", "left", "down", "right")
+                          if compiler.simulate_slide(grid, d) is not None]
+            st = self._state([row[:] for row in grid],
+                             ["up", "left", "down", "right"])
+            out = compiler.compile_state(st)
+            self.assertEqual(sorted(out["options"]), sorted(legal_dirs), grid)
+            for d in legal_dirs:
+                # mirror agrees with the independent advance reference
+                self.assertEqual(compiler._advance_possible(grid, d),
+                                 ref_advance(grid, d), (grid, d))
+                mw = out["options"][d]["min_wiggles_after_spawn"]
+                self.assertIsInstance(mw, int)
+                self.assertIn(mw, (0, 1, 2, 3, 4), (grid, d))
+                # and the reference min: brute force over spawn-edge empties
+                nxt = compiler.simulate_slide(grid, d)["next"]
+                worst = None
+                for (r, c) in compiler._opposite_edge_cells(d):
+                    if nxt[r][c] != 0:
+                        continue
+                    h = [row[:] for row in nxt]
+                    h[r][c] = st["queue"][0]
+                    n = sum(1 for dd in ("up", "left", "down", "right")
+                            if ref_advance(h, dd))
+                    worst = n if worst is None else min(worst, n)
+                self.assertEqual(mw, worst, (grid, d))
 
 
 # ---------------- fallback policy (AC 2c, 2d) ----------------
